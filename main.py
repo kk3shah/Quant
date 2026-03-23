@@ -310,11 +310,8 @@ def main():
     # Schedule the trading job
     schedule.every(interval).minutes.do(run_bot)
 
-    # Daily summaries at 9am, 12pm, 5pm, 9pm EST (UTC-5)
-    schedule.every().day.at("14:00").do(_send_daily_summary)  # 9am EST
-    schedule.every().day.at("17:00").do(_send_daily_summary)  # 12pm EST
-    schedule.every().day.at("22:00").do(_send_daily_summary)  # 5pm EST
-    schedule.every().day.at("02:00").do(_send_daily_summary)  # 9pm EST
+    # Hourly Telegram summary
+    schedule.every().hour.do(_send_daily_summary)
 
     # Run once immediately
     run_bot()
@@ -340,7 +337,9 @@ def main():
             )
         except Exception:
             pass
-    
+        # Send full portfolio summary immediately on startup too
+        _send_daily_summary()
+
     while True:
         schedule.run_pending()
         time.sleep(1)
