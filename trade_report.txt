@@ -1,0 +1,12 @@
+Connecting to Kraken...
+Fetching past orders to identify traded pairs...
+  > Found activity on 9 pairs: {'BOB/USD', 'FWOG/USD', 'PUMP/USD', 'PERP/USD', 'JTO/USD', 'ZRO/USD', 'SYRUP/USD', 'ZRX/USD', 'G/USD'}
+Fetching executed trades for 9 pairs...
+  BOB/USD: 1 trades
+  FWOG/USD: 10 trades
+  PUMP/USD: 16 trades
+  PERP/USD: 8 trades
+  JTO/USD: 5 trades
+  ZRO/USD: 2 trades
+  SYRUP/USD: 6 trades
+  ZRX/USD: 1 trades

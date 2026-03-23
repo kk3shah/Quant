@@ -1,0 +1,7 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python launcher.py"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 10

@@ -1,0 +1,25 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Large / generated data files
+data/audit_log.json
+data/targets.json
+
+# Logs (Railway streams these natively)
+logs/
+
+# macOS
+.DS_Store
+
+# Debug artifacts
+debug.log
+debug_output.txt
+scanner.log
