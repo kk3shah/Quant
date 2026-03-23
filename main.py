@@ -187,8 +187,11 @@ def main():
     # Schedule the trading job
     schedule.every(interval).minutes.do(run_bot)
 
-    # Daily summary at 20:00 UTC every day
-    schedule.every().day.at("20:00").do(_send_daily_summary)
+    # Daily summaries at 9am, 12pm, 5pm, 9pm EST (UTC-5)
+    schedule.every().day.at("14:00").do(_send_daily_summary)  # 9am EST
+    schedule.every().day.at("17:00").do(_send_daily_summary)  # 12pm EST
+    schedule.every().day.at("22:00").do(_send_daily_summary)  # 5pm EST
+    schedule.every().day.at("02:00").do(_send_daily_summary)  # 9pm EST
 
     # Run once immediately
     run_bot()
