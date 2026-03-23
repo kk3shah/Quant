@@ -36,12 +36,26 @@ def _send(text: str) -> None:
         pass
 
 
-def notify_startup(equity: float, mode: str) -> None:
+def notify_startup(equity: float, mode: str, equity_cad: float = 0,
+                   max_positions: int = 3, target_per_slot: float = 0) -> None:
+    cad_str   = f"  CAD: <b>${equity_cad:,.2f}</b>\n" if equity_cad else ""
+    slot_str  = f"  Target/slot: ${target_per_slot:.2f}\n" if target_per_slot else ""
+    blocked   = target_per_slot > 0 and target_per_slot < 15.0
+    warn      = "  ⚠️ Alloc &lt; $15 Kraken min — entries will be blocked until cash frees up\n" if blocked else ""
+    now_est   = datetime.datetime.utcnow() - datetime.timedelta(hours=5)
     _send(
-        f"🤖 <b>Quant Bot Online</b>\n"
-        f"Mode: {mode}\n"
-        f"Equity: <b>${equity:,.2f}</b>\n"
-        f"Time: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
+        f"🤖 <b>Quant Bot Online</b>  [{mode}]\n"
+        f"{now_est.strftime('%I:%M %p EST  •  %a %d %b %Y')}\n"
+        f"\n"
+        f"💰 <b>Equity</b>\n"
+        f"  USD: <b>${equity:,.2f}</b>\n"
+        f"{cad_str}"
+        f"\n"
+        f"🎰 <b>Slots</b>: {max_positions} max\n"
+        f"{slot_str}"
+        f"{warn}"
+        f"\n"
+        f"Summaries at 9am · 12pm · 5pm · 9pm EST"
     )
 
 
