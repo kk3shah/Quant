@@ -41,10 +41,13 @@ except ImportError:
 
 # Module-level engine to persist kill-switch state & daily counters across cycles
 _engine = None
+_cycle_count = 0
+_last_summary_cycle = 0   # send summary every 6 cycles (~30 min at 5-min intervals)
 
 def run_bot():
-    global _engine
-    print(colored("\n--- Starting Trading Routine (Reformed) ---", "cyan"))
+    global _engine, _cycle_count, _last_summary_cycle
+    _cycle_count += 1
+    print(colored(f"\n--- Starting Trading Routine (Reformed) [cycle #{_cycle_count}] ---", "cyan"))
     
     # 1. Setup
     conf = Config()
@@ -103,6 +106,11 @@ def run_bot():
     print_daily_report(execution_handler)
     
     print(colored("--- Routine Finished ---\n", "cyan"))
+
+    # Send Telegram summary every 6 cycles (~30 min) so you always see activity
+    if notifier and (_cycle_count - _last_summary_cycle) >= 6:
+        _last_summary_cycle = _cycle_count
+        _send_daily_summary()
 
 def _get_current_equity() -> float:
     """Quick equity fetch for notifications — returns 0.0 on any error."""
@@ -309,9 +317,6 @@ def main():
 
     # Schedule the trading job
     schedule.every(interval).minutes.do(run_bot)
-
-    # Hourly Telegram summary
-    schedule.every().hour.do(_send_daily_summary)
 
     # Run once immediately
     run_bot()

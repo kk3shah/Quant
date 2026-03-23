@@ -19,21 +19,24 @@ try:
 except ImportError:
     _ok = False
 
-_TOKEN   = os.getenv('TELEGRAM_BOT_TOKEN', '')
-_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
+_TOKEN   = os.getenv('TELEGRAM_BOT_TOKEN', '8436312230:AAELpXdhwwt4b6oe2Ysd0X4LSwWjcH4313c')
+_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '5572465493')
 
 
 def _send(text: str) -> None:
     if not _TOKEN or not _CHAT_ID or not _ok:
+        print(f"[NOTIFIER] Cannot send — token={bool(_TOKEN)} chat={bool(_CHAT_ID)} requests={_ok}")
         return
     try:
-        _requests.post(
+        r = _requests.post(
             f"https://api.telegram.org/bot{_TOKEN}/sendMessage",
             json={'chat_id': _CHAT_ID, 'text': text, 'parse_mode': 'HTML'},
-            timeout=10,
+            timeout=15,
         )
-    except Exception:
-        pass
+        if not r.ok:
+            print(f"[NOTIFIER] Telegram error {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        print(f"[NOTIFIER] Send failed: {e}")
 
 
 def notify_startup(equity: float, mode: str, equity_cad: float = 0,
@@ -55,7 +58,7 @@ def notify_startup(equity: float, mode: str, equity_cad: float = 0,
         f"{slot_str}"
         f"{warn}"
         f"\n"
-        f"Summaries at 9am · 12pm · 5pm · 9pm EST"
+        f"Summaries: every hour · Trades alerted instantly"
     )
 
 
