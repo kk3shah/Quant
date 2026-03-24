@@ -1,7 +1,7 @@
 import json
 import ccxt
 from strategies.engine import StrategyEngine
-from data.handler import DataHandler
+from exchange_data.handler import DataHandler
 from execution.handler import ExecutionHandler
 
 exchange = ccxt.kraken()

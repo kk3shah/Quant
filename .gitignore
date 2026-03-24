@@ -23,3 +23,6 @@ logs/
 debug.log
 debug_output.txt
 scanner.log
+
+# data/ is a Railway volume mount — only commit seed files, not the Python module
+data/__pycache__/

@@ -52,7 +52,7 @@ class _Tee:
 
 try:
     from config import Config
-    from data.handler import DataHandler
+    from exchange_data.handler import DataHandler
     from execution.handler import ExecutionHandler
     from strategies.engine import StrategyEngine
     from reporting.daily_report import print_daily_report
