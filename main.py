@@ -24,6 +24,10 @@ def _tg(text: str) -> None:
         print(f"[TG] send failed: {e}")
 
 
+# ── Fire immediately at module load — before any local import can crash us ──
+_tg(f"🟡 main.py loaded — importing modules...")
+
+
 class _Tee:
     """Write to multiple streams simultaneously (console + log file)."""
     def __init__(self, *streams):
@@ -46,15 +50,20 @@ class _Tee:
     def isatty(self):
         return False
 
-from config import Config
-from data.handler import DataHandler
-from execution.handler import ExecutionHandler
-from strategies.engine import StrategyEngine
-from reporting.daily_report import print_daily_report
 try:
-    import notifier
-except ImportError:
-    notifier = None
+    from config import Config
+    from data.handler import DataHandler
+    from execution.handler import ExecutionHandler
+    from strategies.engine import StrategyEngine
+    from reporting.daily_report import print_daily_report
+    try:
+        import notifier
+    except ImportError:
+        notifier = None
+    _tg("🟢 <b>Quant Bot online</b> — all modules loaded, starting first cycle...")
+except Exception as _import_err:
+    _tg(f"🔴 <b>Bot crashed on import</b>\n<code>{_import_err}</code>")
+    raise
 
 # Module-level engine to persist kill-switch state & daily counters across cycles
 _engine = None
@@ -311,14 +320,6 @@ def _send_daily_summary():
 
 
 def main():
-    # ── Step 0: ping Telegram IMMEDIATELY so we know the process started ──
-    now_est = datetime.datetime.utcnow() - datetime.timedelta(hours=5)
-    _tg(
-        f"🟢 <b>Quant Bot starting up</b>\n"
-        f"{now_est.strftime('%I:%M %p EST  •  %a %d %b %Y')}\n"
-        f"Initialising exchange + first cycle..."
-    )
-
     conf = Config()
     interval = conf.BOT_INTERVAL_MINUTES
     mode = "PAPER" if conf.PAPER_TRADING else "LIVE"
