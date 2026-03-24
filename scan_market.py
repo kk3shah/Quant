@@ -53,7 +53,17 @@ def scan_market():
         candidates = []
         
         # Filter Universe (USD pairs only, no stablecoins, no geo-restricted coins)
-        restricted = ['WAR'] # WAR trading restricted for CA:ON
+        restricted = ['WAR', 'FIDD', 'GRASS']  # CA:ON restricted pairs
+
+        # Load auto-blacklisted pairs from persistent file (populated on CA:ON rejections)
+        _blacklist_file = 'data/restricted_pairs.json'
+        if os.path.exists(_blacklist_file):
+            try:
+                with open(_blacklist_file) as _f:
+                    _dynamic = json.load(_f)
+                restricted = list(set(restricted) | set(_dynamic))
+            except Exception:
+                pass
         
         # Exclude stablecoins (expanded list) and fiat-pair suffixes.
         # USDG, USDD, FRAX, TUSD, GUSD, PYUSD were previously slipping through.

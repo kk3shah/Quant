@@ -283,6 +283,25 @@ class ExecutionHandler:
             print(colored(f"Order rejected (Exchange Error/Restricted): {e}", "red"))
             if audit_logger:
                 audit_logger.log_rejected_order(symbol, side, f"ExchangeError: {e}")
+            # Auto-blacklist CA:ON restricted pairs so they never appear in targets again
+            _err = str(e).lower()
+            if 'eaccount:invalid permissions' in _err or 'trading restricted for ca:on' in _err:
+                import json, os
+                _ticker = symbol.split('/')[0]
+                _bl_file = 'data/restricted_pairs.json'
+                os.makedirs('data', exist_ok=True)
+                _bl = []
+                if os.path.exists(_bl_file):
+                    try:
+                        with open(_bl_file) as _f:
+                            _bl = json.load(_f)
+                    except Exception:
+                        pass
+                if _ticker not in _bl:
+                    _bl.append(_ticker)
+                    with open(_bl_file, 'w') as _f:
+                        json.dump(_bl, _f, indent=2)
+                    print(colored(f"  [BLACKLIST] {_ticker} added to data/restricted_pairs.json (CA:ON restricted).", "yellow"))
             return None
         except Exception as e:
             print(colored(f"Order rejected (Unknown Error): {e}", "red"))
