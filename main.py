@@ -4,7 +4,24 @@ import sys
 import os
 import datetime
 import ccxt
+import requests as _tg_requests
 from termcolor import colored
+
+# ── Telegram hard-wired constants (fallback when env vars not set) ──
+_TG_TOKEN   = os.getenv('TELEGRAM_BOT_TOKEN',  '8436312230:AAELpXdhwwt4b6oe2Ysd0X4LSwWjcH4313c')
+_TG_CHAT    = os.getenv('TELEGRAM_CHAT_ID',    '5572465493')
+
+def _tg(text: str) -> None:
+    """Fire-and-forget Telegram send — never raises."""
+    try:
+        r = _tg_requests.post(
+            f"https://api.telegram.org/bot{_TG_TOKEN}/sendMessage",
+            json={'chat_id': _TG_CHAT, 'text': text, 'parse_mode': 'HTML'},
+            timeout=15,
+        )
+        print(f"[TG] {'OK' if r.ok else f'ERR {r.status_code}: {r.text[:120]}'}")
+    except Exception as e:
+        print(f"[TG] send failed: {e}")
 
 
 class _Tee:
@@ -107,8 +124,8 @@ def run_bot():
     
     print(colored("--- Routine Finished ---\n", "cyan"))
 
-    # Send Telegram summary every 6 cycles (~30 min) so you always see activity
-    if notifier and (_cycle_count - _last_summary_cycle) >= 6:
+    # Send Telegram summary every 6 cycles (~30 min)
+    if (_cycle_count - _last_summary_cycle) >= 6:
         _last_summary_cycle = _cycle_count
         _send_daily_summary()
 
@@ -127,10 +144,8 @@ def _get_current_equity() -> float:
 
 def _send_daily_summary():
     """Comprehensive Telegram report: equity in USD+CAD, all positions, slot/cash status, bot health."""
-    if not notifier:
-        return
     try:
-        import json, os, time as _time
+        import json, time as _time
         conf = Config()
         exchange_class = getattr(ccxt, conf.EXCHANGE_ID)
         exchange = exchange_class({'apiKey': conf.API_KEY, 'secret': conf.SECRET_KEY, 'enableRateLimit': True})
@@ -288,17 +303,22 @@ def _send_daily_summary():
             f"  Fees paid: ${day_fees:.4f}",
         ]
 
-        notifier._send('\n'.join(lines))
+        _tg('\n'.join(lines))
 
     except Exception as e:
-        print(f"[NOTIFIER] Daily summary error: {e}")
-        try:
-            notifier._send(f"⚠️ Summary failed: {e}")
-        except Exception:
-            pass
+        print(f"[SUMMARY] Error: {e}")
+        _tg(f"⚠️ <b>Summary error</b>\n<code>{str(e)[:300]}</code>")
 
 
 def main():
+    # ── Step 0: ping Telegram IMMEDIATELY so we know the process started ──
+    now_est = datetime.datetime.utcnow() - datetime.timedelta(hours=5)
+    _tg(
+        f"🟢 <b>Quant Bot starting up</b>\n"
+        f"{now_est.strftime('%I:%M %p EST  •  %a %d %b %Y')}\n"
+        f"Initialising exchange + first cycle..."
+    )
+
     conf = Config()
     interval = conf.BOT_INTERVAL_MINUTES
     mode = "PAPER" if conf.PAPER_TRADING else "LIVE"
@@ -307,7 +327,7 @@ def main():
     logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
     os.makedirs(logs_dir, exist_ok=True)
     log_path = os.path.join(logs_dir, f"bot_{datetime.date.today():%Y-%m-%d}.log")
-    _log_file = open(log_path, 'a', buffering=1)  # line-buffered
+    _log_file = open(log_path, 'a', buffering=1)
     sys.stdout = _Tee(sys.__stdout__, _log_file)
     sys.stderr = _Tee(sys.__stderr__, _log_file)
 
@@ -318,32 +338,11 @@ def main():
     # Schedule the trading job
     schedule.every(interval).minutes.do(run_bot)
 
-    # Run once immediately
+    # Run first cycle immediately
     run_bot()
 
-    # Startup notification (after first cycle so equity is fresh)
-    if notifier:
-        try:
-            _startup_equity = _get_current_equity()
-            _cad_rate = 1.37
-            try:
-                import ccxt as _ccxt
-                _ex = _ccxt.kraken({'apiKey': conf.API_KEY, 'secret': conf.SECRET_KEY, 'enableRateLimit': True})
-                _cad_rate = _ex.fetch_ticker('USDCAD')['last']
-            except Exception:
-                pass
-            _target = (_startup_equity * 0.90) / conf.TARGET_POSITIONS_NUM
-            notifier.notify_startup(
-                equity=_startup_equity,
-                mode=mode,
-                equity_cad=_startup_equity * _cad_rate,
-                max_positions=conf.MAX_OPEN_POSITIONS,
-                target_per_slot=_target,
-            )
-        except Exception:
-            pass
-        # Send full portfolio summary immediately on startup too
-        _send_daily_summary()
+    # After first cycle, send full portfolio summary
+    _send_daily_summary()
 
     while True:
         schedule.run_pending()
