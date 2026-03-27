@@ -3,6 +3,9 @@ import time
 import sys
 import os
 import datetime
+from zoneinfo import ZoneInfo
+
+_ET = ZoneInfo('America/Toronto')
 import ccxt
 import requests as _tg_requests
 from termcolor import colored
@@ -126,7 +129,21 @@ def run_bot():
     try:
         _engine.analyze_batch(universe)
     except Exception as e:
-        print(colored(f"Fatal Error in Batch Analysis: {e}", "red")) 
+        print(colored(f"Fatal Error in Batch Analysis: {e}", "red"))
+
+    # SELF-LEARNING: Run optimizer after every cycle to auto-adjust thresholds
+    try:
+        from strategies.optimizer import run_optimizer
+        _opt_changes = run_optimizer(current_cycle=_cycle_count)
+        if _opt_changes:
+            for msg in _opt_changes:
+                print(colored(msg, "yellow"))
+            # Alert Telegram when a strategy is disabled or re-enabled
+            _alert_msgs = [m for m in _opt_changes if 'DISABLED' in m or 're-enabled' in m]
+            if _alert_msgs:
+                _tg('🤖 <b>Optimizer update</b>\n' + '\n'.join(f'  {m}' for m in _alert_msgs))
+    except Exception as _oe:
+        print(f"[OPTIMIZER] Error: {_oe}")
 
     # 3. Report
     print_daily_report(execution_handler)
@@ -249,10 +266,9 @@ def _send_daily_summary():
         day_trades  = _engine.daily_trade_count  if _engine and hasattr(_engine, 'daily_trade_count')  else 0
         day_fees    = _engine.daily_fee_total     if _engine and hasattr(_engine, 'daily_fee_total')    else 0.0
 
-        # ── EST label ────────────────────────────────────────────
-        now_utc  = datetime.datetime.utcnow()
-        now_est  = now_utc - datetime.timedelta(hours=5)
-        ts_label = now_est.strftime('%I:%M %p EST  •  %a %d %b %Y')
+        # ── ET label (handles EST/EDT automatically) ─────────────
+        now_et   = datetime.datetime.now(_ET)
+        ts_label = now_et.strftime('%I:%M %p ET  •  %a %d %b %Y')
 
         # ── Build message ─────────────────────────────────────────
         lines = [
@@ -311,6 +327,15 @@ def _send_daily_summary():
             f"  Trades executed: {day_trades}",
             f"  Fees paid: ${day_fees:.4f}",
         ]
+
+        # ── Optimizer status ──────────────────────────────────────────────
+        try:
+            from strategies.optimizer import get_strategy_status
+            opt_lines = get_strategy_status()
+            if opt_lines:
+                lines += ['', '🤖 <b>OPTIMIZER</b>'] + opt_lines
+        except Exception:
+            pass
 
         _tg('\n'.join(lines))
 

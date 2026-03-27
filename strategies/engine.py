@@ -283,7 +283,14 @@ class StrategyEngine:
         print(colored("\n--- Starting Batch Analysis (Reformed) ---", "cyan"))
         
         from config import Config
-        
+
+        # ─── SELF-LEARNING: Load per-strategy thresholds from optimizer ───
+        try:
+            from strategies.optimizer import load_params as _load_opt_params
+            _strategy_params = _load_opt_params().get('strategies', {})
+        except Exception:
+            _strategy_params = {}
+
         # ─── KILL SWITCH: Check drawdown ───
         self._reset_daily_counters()
         current_equity = self._calculate_equity()
@@ -716,6 +723,12 @@ class StrategyEngine:
             _all_buy_signals_this_target = []  # track competing signals for TRADE_ENTRY log
 
             for strat_name in allowed_strategies:
+                # Skip strategies disabled by optimizer (consecutive-loss cooldown)
+                _opt_p = _strategy_params.get(strat_name, {})
+                if not _opt_p.get('enabled', True):
+                    print(colored(f"    > {strat_name}: optimizer cooldown active — skipping", "yellow"))
+                    continue
+
                 strat = self.strategies[strat_name]
                 sig = strat.get_signal(symbol, bars)
                 _meta = sig.get('meta', {}) or {}
@@ -740,6 +753,12 @@ class StrategyEngine:
                     )
 
                 if 'BUY' in sig['signal']:
+                    # Optimizer min_score gate: only act on high-conviction signals
+                    _min_score = _strategy_params.get(strat_name, {}).get('min_score', 60)
+                    if sig.get('score', 0) < _min_score:
+                        print(f"    > {strat_name}: score {sig.get('score',0)} "
+                              f"< min_score {_min_score} (optimizer gate) — skipping")
+                        continue
                     _all_buy_signals_this_target.append({
                         'strategy': strat_name, 'signal': sig['signal'],
                         'score': sig.get('score', 0), 'regime': regime,
