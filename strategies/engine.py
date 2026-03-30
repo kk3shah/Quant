@@ -28,7 +28,12 @@ class StrategyEngine:
         # Load starting_equity from disk so kill switch survives restarts.
         # Previously this was only in memory — a restart after losses reset the budget.
         self.starting_equity = self._load_starting_equity()
-        
+
+        # Reconcile positions.json against real Kraken balance on startup.
+        # Removes phantom positions (in file but not on exchange) so they don't
+        # block slot counting. Adds untracked real holdings so stop-loss works.
+        self._reconcile_positions()
+
         # Initialize All Strategies
         self.strategies = {
             'VOL_BREAKOUT': VolatilityBreakoutStrategy(data_handler, execution_handler),
@@ -73,6 +78,110 @@ class StrategyEngine:
                     return val
             except: pass
         return None
+
+    def _reconcile_positions(self):
+        """
+        Reconcile positions.json against the live Kraken balance on startup.
+
+        - PHANTOM entries (in file, not on exchange or < MIN_POSITION_VALUE_USD):
+          removed so they stop consuming slots.
+        - UNTRACKED holdings (on exchange, not in file, value >= MIN_POSITION_VALUE_USD):
+          added with entry_price = current live price so stop-loss / take-profit work.
+          (We don't know the real entry price, so we use current price — this means
+          the position starts at 0% P&L; any further drop will hit the stop.)
+
+        All changes are printed and Telegram-alerted so you always know what changed.
+        """
+        import json, os, time as _time
+        from config import Config
+        pos_file = 'data/positions.json'
+        fiat = {'USD', 'ZUSD', 'USDT', 'USDC', 'KFEE', 'ZCAD', 'CAD', 'EUR', 'GBP'}
+
+        try:
+            balance = self.execution_handler.exchange.fetch_balance()
+            kraken_holdings = {
+                asset: qty
+                for asset, qty in balance.get('total', {}).items()
+                if asset not in fiat and qty and qty > 0.0001
+            }
+        except Exception as e:
+            print(f"  [RECONCILE] Could not fetch balance: {e}")
+            return
+
+        pos_data = {}
+        if os.path.exists(pos_file):
+            try:
+                with open(pos_file) as f:
+                    pos_data = json.load(f)
+            except Exception:
+                pass
+
+        changes = []
+
+        # 1. Remove phantoms — positions tracked locally but not (or dust) on Kraken
+        for symbol in list(pos_data.keys()):
+            asset = symbol.split('/')[0]
+            kraken_qty = kraken_holdings.get(asset, 0)
+            real_value = 0.0
+            if kraken_qty > 0.0001:
+                try:
+                    ticker = self.execution_handler.exchange.fetch_ticker(symbol)
+                    real_value = kraken_qty * ticker['last']
+                except Exception:
+                    pass
+            if real_value < Config.MIN_POSITION_VALUE_USD:
+                del pos_data[symbol]
+                msg = (f"  [RECONCILE] Removed phantom position {symbol} "
+                       f"(Kraken has ${real_value:.4f} — below ${Config.MIN_POSITION_VALUE_USD} threshold)")
+                print(msg)
+                changes.append(msg)
+
+        # 2. Add untracked real holdings
+        for asset, qty in kraken_holdings.items():
+            symbol = f"{asset}/{Config.QUOTE_CURRENCY}"
+            if symbol in pos_data:
+                continue  # already tracked
+            try:
+                ticker = self.execution_handler.exchange.fetch_ticker(symbol)
+                value = qty * ticker['last']
+                if value < Config.MIN_POSITION_VALUE_USD:
+                    continue
+                # Use current price as synthetic entry (best we can do without history)
+                pos_data[symbol] = {
+                    'entry_price': ticker['last'],
+                    'entry_time': int(_time.time() * 1000),
+                    'strategy': 'RECONCILED',
+                    'peak_price': ticker['last'],
+                }
+                msg = (f"  [RECONCILE] Added untracked {symbol}: "
+                       f"qty={qty:.4f}, price=${ticker['last']:.5f}, value=${value:.2f} "
+                       f"(entry_price set to current — stop-loss now active)")
+                print(msg)
+                changes.append(msg)
+            except Exception:
+                pass
+
+        if changes:
+            try:
+                with open(pos_file, 'w') as f:
+                    json.dump(pos_data, f, indent=2)
+                print(f"  [RECONCILE] positions.json updated ({len(changes)} changes)")
+                # Alert Telegram
+                try:
+                    import requests as _req
+                    import os as _os
+                    _token = _os.getenv('TELEGRAM_BOT_TOKEN', '8436312230:AAELpXdhwwt4b6oe2Ysd0X4LSwWjcH4313c')
+                    _chat  = _os.getenv('TELEGRAM_CHAT_ID', '5572465493')
+                    _body  = '🔄 <b>Position reconciliation on startup</b>\n' + '\n'.join(changes)
+                    _req.post(f"https://api.telegram.org/bot{_token}/sendMessage",
+                              json={'chat_id': _chat, 'text': _body, 'parse_mode': 'HTML'},
+                              timeout=10)
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"  [RECONCILE] Failed to write positions.json: {e}")
+        else:
+            print("  [RECONCILE] positions.json is in sync with Kraken balance.")
 
     def _save_starting_equity(self, equity):
         """Persist starting_equity so it survives bot restarts."""
@@ -585,6 +694,16 @@ class StrategyEngine:
         # 2B. CHECK DAILY LIMITS BEFORE ENTRIES
         if self.daily_trade_count >= Config.MAX_DAILY_TRADES:
             print(colored(f"  > Daily trade limit reached ({self.daily_trade_count}/{Config.MAX_DAILY_TRADES}). No new entries.", "yellow"))
+            return
+
+        # 2C. HARD BEAR MARKET GATE — no new longs when BTC+ETH are both below SMA20
+        if global_trend == 'BEARISH':
+            print(colored("  > BEAR MARKET GATE: BTC+ETH both below SMA20 — skipping all new entries.", "red"))
+            if audit_logger:
+                audit_logger.log_cycle(equity=current_equity, cash=_cash_log,
+                    open_positions_count=_open_pos_count, daily_trade_count=self.daily_trade_count,
+                    market_regime='BEARISH_BLOCKED', drawdown_pct=_drawdown_pct,
+                    portfolio_heat_pct=_portfolio_heat_pct, daily_fees_paid=self.daily_fee_total)
             return
 
         # 3. EXECUTION LOGIC

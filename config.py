@@ -23,8 +23,10 @@ class Config:
     MIN_VOLUME_24H = 200000    # $200k min daily volume for small-cap runners
     
     # ─── POSITION SIZING ───
-    MAX_OPEN_POSITIONS = 3   # 3 concurrent positions (~$19/slot at $57 equity clears $15 minimum)
-    TARGET_POSITIONS_NUM = 3 # target 3 concurrent trades
+    # Reduced to 2 slots: at ~$50 equity this gives ~$22/slot vs ~$15 with 3 slots.
+    # More capital per trade → strategies have room to breathe before hitting stop.
+    MAX_OPEN_POSITIONS = 2
+    TARGET_POSITIONS_NUM = 2
 
     # ─── DUST FILTER ───
     MIN_POSITION_VALUE_USD = 1.00  # ignore any holding worth less than $1
