@@ -554,13 +554,12 @@ class StrategyEngine:
                 recent_high = bars['high'].tail(12).max()
                 drawdown_from_peak = (current_price - recent_high) / recent_high
 
-                # Trail width depends on how much profit we have:
-                # - ROI < 3%: tight trail (1.5%) — protect what little we have
-                # - ROI >= 3%: wider trail (3.0%) — let winners breathe
-                # Previously always used 3.0%, which could turn a +2% winner into a -1% exit.
-                trail_pct = -0.015 if roi < 0.03 else -0.030
+                # Trail width scales with profit to protect gains without cutting winners:
+                # - ROI < 5%: tight trail (2%) — lock in early gains above fee threshold
+                # - ROI >= 5%: wider trail (4%) — let larger winners breathe
+                trail_pct = -0.020 if roi < 0.05 else -0.040
 
-                if roi > 0.02 and drawdown_from_peak < trail_pct:
+                if roi > 0.03 and drawdown_from_peak < trail_pct:
                     print(colored(f"  [TRAILING STOP] {symbol} dropped {drawdown_from_peak*100:.1f}% from peak (trail={trail_pct*100:.1f}%). Banking {roi*100:.1f}%.", "green"))
                     should_sell = True
                     if exit_reason is None:

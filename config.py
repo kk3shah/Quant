@@ -44,23 +44,27 @@ class Config:
     
     # ─── COMMISSION & FEES (Limit Orders = Maker Rate) ───
     FEE_RATE = 0.0016       # 0.16% maker fee per side
-    ROUND_TRIP_FEE = 0.0032 # 0.32% total 
-    MIN_PROFIT_THRESHOLD = 0.02  # 2% min to sell (guarantees fee clearance)
+    ROUND_TRIP_FEE = 0.0032 # 0.32% total
     DEFAULT_ORDER_TYPE = 'limit'
     
     # ─── RISK:REWARD ───
-    # 1:3 ratio: break-even win rate = 25% (well below historical 28.6%)
-    # Old: 3% SL / 4% TP required 57% win rate — mathematically impossible.
-    STOP_LOSS = 0.02        # 2% hard stop
-    TAKE_PROFIT = 0.06      # 6% target
-    
+    # 2.5:1 ratio → break-even win rate = 28.6%.
+    # WHY CHANGED: 2% SL was too tight for crypto. A single 15-min candle
+    # regularly moves 2-5% on normal volatility. ALGO was bought at $0.088,
+    # stopped out at -2% ($0.087), then rallied to $0.107 (+20%) — the bot
+    # sold a winner as a loser. 4% SL gives positions room to breathe through
+    # normal volatility before mean-reversion strategies can work.
+    STOP_LOSS = 0.04        # 4% hard stop (was 2% — too tight, caused premature exits)
+    TAKE_PROFIT = 0.10      # 10% target (was 6% — maintains 2.5:1 R:R ratio)
+    MIN_PROFIT_THRESHOLD = 0.015  # 1.5% min to sell (clears 0.32% fees + buffer)
+
     # ─── KILL SWITCH & DAILY LIMITS ───
     MAX_DRAWDOWN = 0.20           # 20% max drawdown
     MAX_DAILY_TRADES = 10         # Max 10 trades per day
     MAX_DAILY_FEE_BUDGET = 5.00   # Stop if fees exceed $5.00
-    
+
     # ─── ADVANCED RISK CONTROLS ───
-    MAX_HOLD_TIME_HOURS = 6       # Give trades 6h to play out
+    MAX_HOLD_TIME_HOURS = 12      # 12h (was 6h — mean-reversion needs more time to play out)
     TRADING_HOURS = (0, 24)       # 24/7 Crypto Markets
     TREND_FILTER = True           # Only buy if price > SMA20
     
