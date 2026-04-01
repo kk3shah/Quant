@@ -23,10 +23,12 @@ class Config:
     MIN_VOLUME_24H = 200000    # $200k min daily volume for small-cap runners
     
     # ─── POSITION SIZING ───
-    # Reduced to 2 slots: at ~$50 equity this gives ~$22/slot vs ~$15 with 3 slots.
-    # More capital per trade → strategies have room to breathe before hitting stop.
-    MAX_OPEN_POSITIONS = 2
-    TARGET_POSITIONS_NUM = 2
+    # Fixed $15 per trade (Kraken minimum). Slot count is derived dynamically
+    # from available cash: slots = floor(cash × 0.90 / FIXED_ALLOCATION_USD).
+    # This means the bot always makes as many $15 trades as cash allows rather
+    # than concentrating into fewer large positions.
+    FIXED_ALLOCATION_USD = 15.0   # exactly Kraken's minimum — every trade is this size
+    MAX_OPEN_POSITIONS   = 5      # hard cap; actual slots limited by cash / 15
 
     # ─── DUST FILTER ───
     MIN_POSITION_VALUE_USD = 1.00  # ignore any holding worth less than $1

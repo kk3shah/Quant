@@ -732,14 +732,24 @@ class StrategyEngine:
                 except Exception:
                     pass  # If price fetch fails, be conservative and don't count it
 
-        target_slots = Config.TARGET_POSITIONS_NUM
-        slots_available = max(0, target_slots - active_positions)
+        # ─── POSITION SIZING: fixed $15 per trade, slots driven by cash ───
+        alloc = Config.FIXED_ALLOCATION_USD          # e.g. $15.00
+        usable_cash = cash * 0.90                    # keep 10% as fee/slippage buffer
+        cash_slots  = int(usable_cash / alloc)       # how many $15 trades cash can fund
+        hard_cap    = Config.MAX_OPEN_POSITIONS - active_positions
+        slots_available = max(0, min(hard_cap, cash_slots))
+        base_allocation = alloc
 
-        print(f"  > Active Positions: {active_positions} | Slots Available: {slots_available} / {target_slots}")
+        print(f"  > Active Positions: {active_positions} | Cash: ${cash:.2f} | "
+              f"Cash slots: {cash_slots} | Hard cap slots: {hard_cap} → {slots_available} open")
+        print(f"  > Per-trade allocation: ${base_allocation:.2f} (fixed)")
         print(f"  > Open Assets: {open_assets or 'none'}")
 
         if slots_available == 0:
-            print("  > Max positions reached. Skipping buys.")
+            if cash_slots == 0:
+                print(colored(f"  > Not enough cash for a ${alloc:.0f} trade (have ${cash:.2f}).", "yellow"))
+            else:
+                print(colored(f"  > Max positions ({Config.MAX_OPEN_POSITIONS}) reached. Skipping buys.", "yellow"))
             if audit_logger:
                 audit_logger.log_cycle(equity=current_equity, cash=_cash_log,
                     open_positions_count=_open_pos_count, daily_trade_count=self.daily_trade_count,
@@ -747,24 +757,14 @@ class StrategyEngine:
                     portfolio_heat_pct=_portfolio_heat_pct, daily_fees_paid=self.daily_fee_total)
             return
 
-        if cash < 2.0:
-            print("  > Insufficient cash (< $2).")
+        if cash < alloc:
+            print(f"  > Insufficient cash (${cash:.2f} < ${alloc:.0f} minimum).")
             if audit_logger:
                 audit_logger.log_cycle(equity=current_equity, cash=_cash_log,
                     open_positions_count=_open_pos_count, daily_trade_count=self.daily_trade_count,
                     market_regime=global_trend, drawdown_pct=_drawdown_pct,
                     portfolio_heat_pct=_portfolio_heat_pct, daily_fees_paid=self.daily_fee_total)
             return
-
-        # ─── POSITION SIZING ───
-        # Target a fixed $ per slot based on equity (not remaining cash) so each
-        # position is a consistent slice of the portfolio, not affected by how many
-        # slots happen to be free this cycle.  Leave a 10% cash buffer for fees/slippage.
-        target_per_slot = (current_equity * 0.90) / Config.TARGET_POSITIONS_NUM
-        # Never exceed (available cash × 0.90) ÷ remaining slots
-        available_per_slot = (cash * 0.90) / slots_available
-        base_allocation = min(target_per_slot, available_per_slot)
-        print(f"  > Per-slot target: ${target_per_slot:.2f} | Available cap: ${available_per_slot:.2f} → base_alloc=${base_allocation:.2f}")
 
         # ─── DIVERSIFICATION HELPERS ───
         def _group_of(ticker):
@@ -936,26 +936,19 @@ class StrategyEngine:
             price = self.data_handler.get_latest_price(symbol)
             if not price: continue
 
-            # ATR-based position sizing: scale down allocation for high-volatility coins.
-            # A coin with 2x the normal ATR gets half the allocation.
-            # Baseline: median ATR/price ratio across 15m bars (target ~0.5% per candle).
+            # Fixed allocation — always exactly FIXED_ALLOCATION_USD ($15).
+            # ATR scaling was removed: it could reduce below Kraken's $15 minimum,
+            # silently blocking every trade. Log ATR for audit purposes only.
             try:
                 atr_series = (bars['high'] - bars['low']).tail(14)
                 atr = atr_series.mean()
-                atr_pct = atr / price if price > 0 else 0.005
-                # Scale factor: baseline 0.5% ATR → scale=1.0; 1.0% ATR → scale=0.5, etc.
-                baseline_atr_pct = 0.005
-                atr_scale = min(1.0, baseline_atr_pct / atr_pct) if atr_pct > 0 else 1.0
-            except:
+                atr_scale = 1.0  # kept for audit log compatibility
+            except Exception:
+                atr = 0.0
                 atr_scale = 1.0
 
-            allocation_per_trade = base_allocation * atr_scale
-            print(f"    > {symbol}: ATR scale={atr_scale:.2f} → allocation=${allocation_per_trade:.2f}")
-
-            # Min order size check — Kraken rejects orders below ~$10-$15.
-            if allocation_per_trade < 15.0:
-                print(colored(f"    > Allocation ${allocation_per_trade:.2f} too small (<$15). Skipping.", "red"))
-                continue
+            allocation_per_trade = base_allocation  # always Config.FIXED_ALLOCATION_USD
+            print(f"    > {symbol}: allocation=${allocation_per_trade:.2f} (fixed)")
 
             qty = allocation_per_trade / price
             

@@ -259,9 +259,7 @@ def _send_daily_summary():
         # ── Slot maths ────────────────────────────────────────────
         n_pos           = len(positions_detail)
         slots_free      = conf.MAX_OPEN_POSITIONS - n_pos
-        target_per_slot = (equity * 0.90) / conf.TARGET_POSITIONS_NUM
-        avail_per_slot  = (usd_cash * 0.90) / max(slots_free, 1)
-        alloc           = min(target_per_slot, avail_per_slot)
+        alloc           = conf.FIXED_ALLOCATION_USD   # fixed $15 per trade
 
         day_trades  = _engine.daily_trade_count  if _engine and hasattr(_engine, 'daily_trade_count')  else 0
         day_fees    = _engine.daily_fee_total     if _engine and hasattr(_engine, 'daily_fee_total')    else 0.0
