@@ -308,7 +308,7 @@ def _send_daily_summary():
             f"💵 <b>CASH &amp; SLOTS</b>",
             f"  Cash: ${usd_cash:.2f} USD  (${cash_cad:.2f} CAD)",
             f"  Slots: {n_pos} used / {conf.MAX_OPEN_POSITIONS} total  →  {slots_free} free",
-            f"  Target/slot: ${target_per_slot:.2f}  |  Avail/slot: ${avail_per_slot:.2f}",
+            f"  Alloc/trade: ${alloc:.2f}  |  Cash available: ${usd_cash:.2f}",
         ]
 
         if alloc < 15.0 and slots_free > 0:

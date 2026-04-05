@@ -74,13 +74,10 @@ class VolatilitySqueezeStrategy(BaseStrategy):
             signal_type = 'HOLD (SQUEEZE)'
             score = 50 # Watchlist this!
 
-        # Global Trend Filter (Safety)
-        # IMPORTANT: use elif so this never overwrites an already-confirmed BUY signal.
-        # Previously this was a bare `if`, which silently discarded every BUY in bear markets.
-        elif 'global_trend' in bars:
-            if bars['global_trend'].iloc[-1] == 'BEARISH':
-                signal_type = 'HOLD (BTC_BEAR)'
-                score = 0
+        # Bear filter removed: volatility squeezes are market-structure events
+        # (Bollinger Bands compress inside Keltner Channels then break out).
+        # They work in any trend direction — a squeeze breakout in a bear market
+        # often signals a strong relief rally.
 
         # ─── AUDIT CONTEXT ───
         prev_row = bars.iloc[-2]

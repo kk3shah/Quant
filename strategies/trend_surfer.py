@@ -49,11 +49,14 @@ class TrendSurferStrategy(BaseStrategy):
         signal_type = 'HOLD'
         score = 0
 
-        # 0. GLOBAL MACRO FILTER (Critical)
+        # 0. GLOBAL MACRO FILTER — penalty, not blanket block.
+        # Bear markets produce sharp MACD crossovers on relief rallies that can
+        # be very profitable.  Penalise score so only high-conviction setups fire.
+        _bear_penalty = 0
         if 'global_trend' in bars:
             global_trend = bars['global_trend'].iloc[-1]
             if global_trend == 'BEARISH':
-                return {'symbol': symbol, 'signal': 'HOLD (BTC_BEAR)', 'score': 0, 'meta': {}}
+                _bear_penalty = 20  # applied to score after signal confirmed
 
         # 1. CHECK TREND — Only trade above EMA 200 (strong long-term filter)
         if price < ema_trend:
@@ -68,6 +71,7 @@ class TrendSurferStrategy(BaseStrategy):
 
                 # Boost if MACD is above 0 (strong trend) vs below 0 (early reversal)
                 if macd > 0: score += 10
+                score -= _bear_penalty  # 0 in bull, -20 in bear
 
             elif macd > sig:
                 # Already crossed, holding valid uptrend
@@ -83,7 +87,7 @@ class TrendSurferStrategy(BaseStrategy):
         conditions_checked = {
             'price_above_ema200': {'value': round(price, 6), 'threshold': f'>={round(ema_trend,6)} (EMA200)', 'passed': price_above_ema},
             'macd_crossover':     {'value': round(macd, 8), 'threshold': 'MACD crossed above signal', 'passed': macd_crossover},
-            'not_btc_bear':       {'value': global_trend if 'global_trend' in bars else 'N/A', 'threshold': '!=BEARISH', 'passed': (bars['global_trend'].iloc[-1] != 'BEARISH' if 'global_trend' in bars else True)},
+            'bear_penalty':       {'value': _bear_penalty, 'threshold': '0 in bull, -20 in bear', 'passed': _bear_penalty == 0},
         }
         if 'BUY' in signal_type:
             trigger_condition = (
@@ -97,7 +101,7 @@ class TrendSurferStrategy(BaseStrategy):
             if not macd_crossover:
                 if macd > sig: parts.append(f"MACD {macd:.6f} already above signal (no fresh crossover, in uptrend)")
                 else:          parts.append(f"MACD {macd:.6f} below signal {sig:.6f} (no bullish crossover)")
-            if signal_type == 'HOLD (BTC_BEAR)': parts.append("Market BEARISH — global filter blocked entry")
+            if _bear_penalty > 0: parts.append(f"Market BEARISH — score penalized by {_bear_penalty}")
             trigger_condition = None
             needs_for_trigger = "; ".join(parts) if parts else signal_type
 

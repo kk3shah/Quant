@@ -84,18 +84,24 @@ class MomentumPullbackStrategy(BaseStrategy):
         near_lower_bb = bb_distance <= 0.02  # Within 2% of lower BB
         volume_ok = vol_ratio >= 0.7
         not_crashing = not is_freefall
+        # In bear markets, only allow deep pullbacks (RSI ≤ 30) — these are
+        # the highest-conviction mean-reversion entries.  In bull/neutral, any
+        # RSI in the 20-45 zone is fine.
         not_full_bear = global_trend != 'BEARISH'
+        bear_ok = not_full_bear or current_rsi <= 30  # deep pullback overrides bear
 
-        if rsi_in_zone and near_lower_bb and volume_ok and not_crashing and not_full_bear:
+        if rsi_in_zone and near_lower_bb and volume_ok and not_crashing and bear_ok:
             signal_type = 'BUY (PULLBACK)'
             # Score: lower RSI = better entry. RSI 20 → score 95, RSI 45 → score 70
             score = 95 - (current_rsi - 20)
-        elif rsi_in_zone and volume_ok and not_crashing and not_full_bear:
+            if not not_full_bear: score -= 10  # bear penalty
+        elif rsi_in_zone and volume_ok and not_crashing and bear_ok:
             # Weaker signal: RSI is pulled back but not near BB
             # Still viable if RSI is quite low
             if current_rsi <= 40:
                 signal_type = 'BUY (MILD_PULLBACK)'
                 score = 70 - (current_rsi - 20)
+                if not not_full_bear: score -= 10
 
         # SELL CONDITIONS
         if current_rsi > 65:
@@ -111,7 +117,7 @@ class MomentumPullbackStrategy(BaseStrategy):
             'near_lower_bb': {'value': round(bb_distance, 4), 'threshold': '<=0.02', 'passed': near_lower_bb},
             'volume_ok':     {'value': round(vol_ratio, 3),   'threshold': '>=0.7',  'passed': volume_ok},
             'not_crashing':  {'value': round(slope_raw, 4),   'threshold': '>-0.03', 'passed': not_crashing},
-            'not_full_bear': {'value': global_trend,          'threshold': '!=BEARISH', 'passed': not_full_bear},
+            'not_full_bear': {'value': global_trend,          'threshold': '!=BEARISH or RSI<=30', 'passed': bear_ok},
         }
         if 'BUY' in signal_type:
             trigger_condition = (

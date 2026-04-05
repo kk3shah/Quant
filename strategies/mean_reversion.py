@@ -65,9 +65,9 @@ class MeanReversionStrategy(BaseStrategy):
         # 3. NOT Crashing (Slope Check / ADX Proxy) - CRITICAL QUANT FILTER
         
         if current_rsi < 30 and current_price < lower_bb * 1.01:
-            if global_trend == 'BEARISH' and current_rsi > 25:
-                signal_type = 'HOLD (BTC_BEAR)'
-            elif is_crashing:
+            # Bear filter removed: RSI<30 + below lower BB is already a high-conviction
+            # oversold signal.  Mean-reversion SHOULD buy in bear markets — that's its edge.
+            if is_crashing:
                 signal_type = 'HOLD (CRASHING)' # Don't catch the knife
             else:
                 signal_type = 'BUY'
@@ -81,12 +81,10 @@ class MeanReversionStrategy(BaseStrategy):
         rsi_ok = current_rsi < 30
         below_bb = current_price < lower_bb * 1.01
         not_crashing = not is_crashing
-        bear_ok = not (global_trend == 'BEARISH' and current_rsi > 25)
         conditions_checked = {
             'rsi_oversold':  {'value': round(current_rsi, 2), 'threshold': '<30', 'passed': rsi_ok},
             'below_lower_bb':{'value': round(current_price, 6), 'threshold': f'<{round(lower_bb*1.01,6)} (lower_BB×1.01)', 'passed': below_bb},
             'not_crashing':  {'value': round(slope_raw, 4), 'threshold': '>-0.02', 'passed': not_crashing},
-            'bear_filter':   {'value': global_trend, 'threshold': 'not BEARISH unless RSI<25', 'passed': bear_ok},
         }
         if 'BUY' in signal_type:
             trigger_condition = (
@@ -99,7 +97,6 @@ class MeanReversionStrategy(BaseStrategy):
             if not rsi_ok:    parts.append(f"RSI={current_rsi:.1f} not oversold (need <30)")
             if not below_bb:  parts.append(f"Price {current_price:.5f} not below lower_BB {lower_bb:.5f}×1.01={lower_bb*1.01:.5f}")
             if is_crashing:   parts.append(f"SMA slope={slope_raw*100:.2f}% (crashing, need >-2%)")
-            if not bear_ok:   parts.append(f"Market BEARISH and RSI={current_rsi:.1f} > 25 (need RSI<25 to override)")
             trigger_condition = None
             needs_for_trigger = "; ".join(parts) if parts else signal_type
 

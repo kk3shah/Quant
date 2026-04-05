@@ -48,10 +48,11 @@ class MomentumStrategy(BaseStrategy):
              vol_spike = True # Default to True if no volume data (fallback)
 
         if current_z > 2.0:
-            # Check Filters
-            if global_trend == 'BEARISH' and current_z < 2.5:
-                signal_type = 'HOLD (BTC_BEAR)'
-            elif not vol_spike and current_z < 2.5:
+            # Bear filter relaxed: Z>2.0 is already a strong move.  Requiring
+            # Z>2.5 in bear markets blocked every signal for days.  Instead,
+            # apply the same Z>2.0 threshold universally and let the volume
+            # filter catch low-conviction moves.
+            if not vol_spike and current_z < 2.5:
                 # If no volume support, we need a HUGE breakout (Z > 2.5) to believe it
                 signal_type = 'HOLD (LOW_VOL)'
             else:
@@ -67,13 +68,11 @@ class MomentumStrategy(BaseStrategy):
             vol_ratio_val = round(cur_vol_val / avg_vol_val, 3) if avg_vol_val and avg_vol_val > 0 else None
 
         z_ok = current_z > 2.0
-        bear_filter = not (global_trend == 'BEARISH' and current_z < 2.5)
         vol_filter = vol_spike or current_z >= 2.5
 
         conditions_checked = {
             'z_score_above_2': {'value': round(current_z, 4), 'threshold': '>2.0', 'passed': z_ok},
             'vol_spike_or_strong_z': {'value': round(current_z, 4), 'threshold': 'vol>2x avg OR z>2.5', 'passed': vol_filter},
-            'bear_filter': {'value': global_trend, 'threshold': 'not (BEARISH and z<2.5)', 'passed': bear_filter},
         }
         if 'BUY' in signal_type:
             trigger_condition = (
@@ -85,7 +84,6 @@ class MomentumStrategy(BaseStrategy):
             parts = []
             if not z_ok:      parts.append(f"Z-score={current_z:.3f} below 2.0 threshold")
             if not vol_filter: parts.append(f"No volume spike (vol_ratio={vol_ratio_val}) and Z-score<2.5")
-            if not bear_filter: parts.append(f"Market BEARISH and Z-score={current_z:.3f} < 2.5 (need z>2.5 in bear)")
             trigger_condition = None
             needs_for_trigger = "; ".join(parts) if parts else signal_type
 
