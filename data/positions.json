@@ -1,13 +1,8 @@
 {
-  "NEAR/USD": {
-    "entry_price": 1.306,
-    "entry_time": 1774098228512,
-    "strategy": "MEAN_REV"
-  },
-  "ALGO/USD": {
-    "entry_price": 0.08881,
-    "entry_time": 1774098239659,
-    "strategy": "MEAN_REV",
-    "peak_price": 0.08928
+  "CC/USD": {
+    "entry_price": 0.14018,
+    "entry_time": 1775391268215,
+    "strategy": "RECONCILED",
+    "peak_price": 0.14018
   }
 }

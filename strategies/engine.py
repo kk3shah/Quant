@@ -418,10 +418,34 @@ class StrategyEngine:
                 drawdown = (self.starting_equity - current_equity) / self.starting_equity
                 print(f"  [EQUITY] Current: ${current_equity:.2f} | Start: ${self.starting_equity:.2f} | DD: {drawdown*100:.1f}%")
                 if drawdown > Config.MAX_DRAWDOWN:
-                    print(colored(f"  🚨 KILL SWITCH: Drawdown {drawdown*100:.1f}% > {Config.MAX_DRAWDOWN*100}%. LIQUIDATING ALL POSITIONS.", "red", attrs=['bold']))
-                    # Liquidate all open positions — don't just stop new buys while losers keep running
+                    print(colored(f"  🚨 KILL SWITCH: Drawdown {drawdown*100:.1f}% > {Config.MAX_DRAWDOWN*100}%.", "red", attrs=['bold']))
+                    # Liquidate all open positions
                     if not Config.PAPER_TRADING:
                         self.execution_handler.liquidate_all()
+
+                    # CRITICAL: Reset starting_equity to current after liquidation.
+                    # Otherwise the bot is permanently stuck: the old baseline is
+                    # unreachable, drawdown stays >20% forever, and the bot never
+                    # trades again. Accept the loss and restart from current equity.
+                    print(colored(f"  [KILL SWITCH] Resetting starting_equity: ${self.starting_equity:.2f} → ${current_equity:.2f}", "yellow"))
+                    self.starting_equity = current_equity
+                    self._save_starting_equity(current_equity)
+
+                    # Alert Telegram
+                    try:
+                        import requests as _req
+                        _token = os.getenv('TELEGRAM_BOT_TOKEN', '8436312230:AAELpXdhwwt4b6oe2Ysd0X4LSwWjcH4313c')
+                        _chat  = os.getenv('TELEGRAM_CHAT_ID', '5572465493')
+                        _req.post(f"https://api.telegram.org/bot{_token}/sendMessage",
+                                  json={'chat_id': _chat, 'parse_mode': 'HTML',
+                                        'text': (f"🚨 <b>KILL SWITCH fired</b>\n"
+                                                 f"Drawdown: {drawdown*100:.1f}%\n"
+                                                 f"Liquidated all positions.\n"
+                                                 f"Baseline reset: ${self.starting_equity:.2f}\n"
+                                                 f"Bot will resume trading next cycle.")},
+                                  timeout=10)
+                    except Exception:
+                        pass
                     return
         
         # ─── DAILY LIMITS CHECK ───
@@ -628,7 +652,9 @@ class StrategyEngine:
             
             # Try to get the strategy that opened this coin
             strategy_name = self.execution_handler.get_origin_strategy(symbol)
-            active_strategy = self.strategies.get(strategy_name) if strategy_name else self.strategies.get('VOL_BREAKOUT') 
+            active_strategy = self.strategies.get(strategy_name) if strategy_name else None
+            if active_strategy is None:
+                active_strategy = self.strategies.get('MOMENTUM_PB')  # safe fallback
             
             # Check for Strategy Exit Signal if available
             bars['global_trend'] = global_trend
@@ -695,15 +721,10 @@ class StrategyEngine:
             print(colored(f"  > Daily trade limit reached ({self.daily_trade_count}/{Config.MAX_DAILY_TRADES}). No new entries.", "yellow"))
             return
 
-        # 2C. HARD BEAR MARKET GATE — no new longs when BTC+ETH are both below SMA20
-        if global_trend == 'BEARISH':
-            print(colored("  > BEAR MARKET GATE: BTC+ETH both below SMA20 — skipping all new entries.", "red"))
-            if audit_logger:
-                audit_logger.log_cycle(equity=current_equity, cash=_cash_log,
-                    open_positions_count=_open_pos_count, daily_trade_count=self.daily_trade_count,
-                    market_regime='BEARISH_BLOCKED', drawdown_pct=_drawdown_pct,
-                    portfolio_heat_pct=_portfolio_heat_pct, daily_fees_paid=self.daily_fee_total)
-            return
+        # NOTE: No hard bear market gate here. Individual strategies have their own
+        # bear filters (MEAN_REV blocks unless RSI<25 in BEARISH, MOMENTUM blocks
+        # all BEARISH entries, etc.). A blanket gate caused the bot to sit idle for
+        # weeks whenever BTC dipped below SMA20.
 
         # 3. EXECUTION LOGIC
         # ─── CASH POSITIONS ───
