@@ -45,9 +45,9 @@ class Config:
     }
     
     # ─── COMMISSION & FEES (Limit Orders = Maker Rate) ───
-    FEE_RATE = 0.0016       # 0.16% maker fee per side
-    ROUND_TRIP_FEE = 0.0032 # 0.32% total
-    DEFAULT_ORDER_TYPE = 'limit'
+    FEE_RATE = 0.0026       # 0.26% taker fee per side (market orders)
+    ROUND_TRIP_FEE = 0.0052 # 0.52% total (buy taker + sell taker)
+    DEFAULT_ORDER_TYPE = 'market'  # was 'limit' — limit orders at bid often sit unfilled; $0.015 taker fee difference is negligible on $15 trades
     
     # ─── RISK:REWARD ───
     # 2.5:1 ratio → break-even win rate = 28.6%.
@@ -56,9 +56,9 @@ class Config:
     # stopped out at -2% ($0.087), then rallied to $0.107 (+20%) — the bot
     # sold a winner as a loser. 4% SL gives positions room to breathe through
     # normal volatility before mean-reversion strategies can work.
-    STOP_LOSS = 0.04        # 4% hard stop (was 2% — too tight, caused premature exits)
-    TAKE_PROFIT = 0.10      # 10% target (was 6% — maintains 2.5:1 R:R ratio)
-    MIN_PROFIT_THRESHOLD = 0.015  # 1.5% min to sell (clears 0.32% fees + buffer)
+    STOP_LOSS = 0.035       # 3.5% hard stop (was 4% — tightened slightly, 12h losses showed trades rarely recovered past -2%)
+    TAKE_PROFIT = 0.08      # 8% target (maintains 2.3:1 R:R)
+    MIN_PROFIT_THRESHOLD = 0.01   # 1% min to sell (lowered — take small wins instead of letting them reverse)
 
     # ─── KILL SWITCH & DAILY LIMITS ───
     MAX_DRAWDOWN = 0.20           # 20% max drawdown
@@ -66,7 +66,7 @@ class Config:
     MAX_DAILY_FEE_BUDGET = 5.00   # Stop if fees exceed $5.00
 
     # ─── ADVANCED RISK CONTROLS ───
-    MAX_HOLD_TIME_HOURS = 12      # 12h (was 6h — mean-reversion needs more time to play out)
+    MAX_HOLD_TIME_HOURS = 6       # 6h (was 12h — data shows losers at 12h never recover; 15m candle signals are stale by then)
     TRADING_HOURS = (0, 24)       # 24/7 Crypto Markets
     TREND_FILTER = True           # Only buy if price > SMA20
     

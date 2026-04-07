@@ -554,49 +554,62 @@ class StrategyEngine:
                      self.execution_handler.submit_order(symbol, qty, 'sell', order_type='market', is_strategy_exit=True)
                      continue
 
-                # 2. TRAILING STOP (The Winner's Edge)
-                # Logic: If ROI > 1.5%, stop is theoretically Break Even (+0.6% fees).
-                # If ROI > 5%, stop trails at ROI - 2%.
-                
+                # 2. SMART EXIT SYSTEM (replaces old trailing stop + time exit)
                 should_sell = False
                 exit_reason = None
 
-                # A. Fee Protection / Break Even / Take Profit
-                # Logic: If above min threshold, start looking for exits.
-                if roi > Config.MIN_PROFIT_THRESHOLD:
-                    # 1. Hard Take Profit
-                    if roi >= Config.TAKE_PROFIT:
-                        print(colored(f"  [TAKE PROFIT] {symbol} hit +{roi*100:.1f}% (Target {Config.TAKE_PROFIT*100}%). Banking Gains.", "green", attrs=['bold']))
-                        should_sell = True
-                        exit_reason = 'take_profit'
+                entry_time = self.execution_handler.get_entry_time(symbol)
+                if entry_time and isinstance(entry_time, str):
+                    try:
+                        entry_time = pd.to_datetime(entry_time)
+                    except:
+                        pass
+                hold_hours = None
+                if entry_time and hasattr(entry_time, 'timestamp'):
+                    hold_hours = (pd.Timestamp.now() - entry_time).total_seconds() / 3600
 
-                    # 2. Stalling Momentum (Simple Check)
-                    # If we are profitable but last candle was red, consider exiting?
-                    # For now, rely on trailing stop below.
-
-                # B. Dynamic Trailing Stop (tightens as profit is small)
-                recent_high = bars['high'].tail(12).max()
-                drawdown_from_peak = (current_price - recent_high) / recent_high
-
-                # Trail width scales with profit to protect gains without cutting winners:
-                # - ROI < 5%: tight trail (2%) — lock in early gains above fee threshold
-                # - ROI >= 5%: wider trail (4%) — let larger winners breathe
-                trail_pct = -0.020 if roi < 0.05 else -0.040
-
-                if roi > 0.03 and drawdown_from_peak < trail_pct:
-                    print(colored(f"  [TRAILING STOP] {symbol} dropped {drawdown_from_peak*100:.1f}% from peak (trail={trail_pct*100:.1f}%). Banking {roi*100:.1f}%.", "green"))
+                # A. TAKE PROFIT — bank gains at target
+                if roi >= Config.TAKE_PROFIT:
+                    print(colored(f"  [TAKE PROFIT] {symbol} hit +{roi*100:.1f}% (Target {Config.TAKE_PROFIT*100}%). Banking.", "green", attrs=['bold']))
                     should_sell = True
-                    if exit_reason is None:
+                    exit_reason = 'take_profit'
+
+                # B. BREAK-EVEN STOP — use tracked peak price to detect "was up, now fading"
+                # If peak ROI was > 1.5% but current ROI drifted back to ~0.5%, sell to protect capital
+                _peak_p = self._get_peak_price(symbol)
+                if not should_sell and _peak_p and entry_price:
+                    peak_roi = (_peak_p - entry_price) / entry_price
+                    if peak_roi > 0.015 and roi < 0.005:
+                        print(colored(f"  [BREAK-EVEN STOP] {symbol} peaked at +{peak_roi*100:.1f}%, now +{roi*100:.1f}%. Protecting capital.", "green"))
+                        should_sell = True
+                        exit_reason = 'breakeven_stop'
+
+                # C. TRAILING STOP — tighter: activate at 1.5% ROI, trail at 1.5%
+                if not should_sell:
+                    recent_high = bars['high'].tail(12).max()
+                    drawdown_from_peak = (current_price - recent_high) / recent_high
+                    if roi > 0.015 and drawdown_from_peak < -0.015:
+                        print(colored(f"  [TRAILING STOP] {symbol} dropped {drawdown_from_peak*100:.1f}% from peak. Banking {roi*100:.1f}%.", "green"))
+                        should_sell = True
                         exit_reason = 'trailing_stop'
 
-                # 3. TIME-BASED EXIT (Momentum Fizzle)
-                entry_time = self.execution_handler.get_entry_time(symbol)
-                if entry_time:
-                    if isinstance(entry_time, str):
-                        try:
-                            entry_time = pd.to_datetime(entry_time)
-                        except:
-                            pass
+                # D. TAKE SMALL WINS — if profitable and above min threshold, take it
+                if not should_sell and roi >= Config.MIN_PROFIT_THRESHOLD:
+                    # In a bear market, take any win above 1%
+                    if global_trend == 'BEARISH':
+                        print(colored(f"  [BEAR PROFIT TAKE] {symbol} +{roi*100:.1f}% in bear market. Taking it.", "green"))
+                        should_sell = True
+                        exit_reason = 'bear_profit_take'
+
+                # E. STALE LOSER EXIT — if losing >1.5% after 2h, cut early
+                # Data showed trades at -2% after 6h never recovered
+                if not should_sell and hold_hours and hold_hours > 2.0 and roi < -0.015:
+                    print(colored(f"  [STALE LOSER] {symbol} at {roi*100:.1f}% after {hold_hours:.1f}h. Cutting early.", "yellow"))
+                    should_sell = True
+                    exit_reason = 'stale_loser'
+
+                # F. TIME-BASED EXIT (last resort)
+                if not should_sell and entry_time and hasattr(entry_time, 'timestamp'):
                     if hasattr(entry_time, 'timestamp'):
                         now = pd.Timestamp.now()
                         if (now - entry_time).total_seconds() > (Config.MAX_HOLD_TIME_HOURS * 3600):
@@ -607,26 +620,13 @@ class StrategyEngine:
 
                 if should_sell:
                     if audit_logger:
-                        _hh_exit = None
-                        try:
-                            if entry_time and hasattr(entry_time, 'timestamp'):
-                                _hh_exit = (pd.Timestamp.now() - entry_time).total_seconds() / 3600
-                        except Exception:
-                            pass
+                        _hh_exit = hold_hours
                         _peak_exit = self._get_peak_price(symbol)
                         _strat_exit = self.execution_handler.get_origin_strategy(symbol)
                         _ind_exit2 = self._quick_indicators(bars)
                         # Build human-readable exit_detail
-                        if exit_reason == 'take_profit':
-                            _detail = f"Take profit hit: +{roi*100:.2f}% (target +{Config.TAKE_PROFIT*100}%)"
-                        elif exit_reason == 'trailing_stop':
-                            _detail = (f"Trailing stop: dropped {abs(drawdown_from_peak)*100:.2f}% from peak "
-                                       f"${recent_high:.5f} (trail={abs(trail_pct)*100:.1f}%, ROI was +{roi*100:.2f}%)")
-                        elif exit_reason == 'time_exit':
-                            _detail = (f"Time exit: held {_hh_exit:.1f}h exceeded MAX_HOLD={Config.MAX_HOLD_TIME_HOURS}h; "
-                                       f"ROI={roi*100:.2f}%")
-                        else:
-                            _detail = f"Exit reason: {exit_reason}; ROI={roi*100:.2f}%"
+                        _hh_str = f"{_hh_exit:.1f}h" if _hh_exit else "?h"
+                        _detail = f"{exit_reason}: ROI={roi*100:+.2f}% after {_hh_str}"
                         audit_logger.log_trade_exit(
                             symbol=symbol, exit_reason=exit_reason or 'unknown',
                             exit_price=current_price, entry_price=entry_price,
