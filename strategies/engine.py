@@ -497,6 +497,26 @@ class StrategyEngine:
         # Signal stats accumulated during entry scan (populated below)
         _cycle_signals = []  # {symbol, strategy, signal, score, regime}
 
+        # ─── CANCEL STALE OPEN ORDERS (limit buys/sells that didn't fill) ───
+        # Prevents locked-up cash from unfilled limit orders
+        try:
+            _open_orders = self.execution_handler.exchange.fetch_open_orders()
+            if _open_orders:
+                import time as _time
+                for _oo in _open_orders:
+                    _oo_age_min = 0
+                    if _oo.get('datetime'):
+                        _oo_age_min = (pd.Timestamp.now(tz='UTC') - pd.Timestamp(_oo['datetime'])).total_seconds() / 60
+                    # Cancel any order older than 5 minutes (one full cycle)
+                    if _oo_age_min > 5:
+                        print(colored(f"  [STALE ORDER] Cancelling {_oo['side']} {_oo['symbol']} ({_oo_age_min:.0f}min old)", "yellow"))
+                        try:
+                            self.execution_handler.exchange.cancel_order(_oo['id'])
+                        except Exception:
+                            pass
+        except Exception as _e:
+            print(f"  Warning: could not check open orders: {_e}")
+
         print(colored("--- Checking Portfolio for Exits ---", "cyan"))
         for asset, qty in positions.items():
             if asset in fiat or qty < 0.0001: continue
@@ -601,9 +621,9 @@ class StrategyEngine:
                         should_sell = True
                         exit_reason = 'bear_profit_take'
 
-                # E. STALE LOSER EXIT — if losing >1.5% after 2h, cut early
-                # Data showed trades at -2% after 6h never recovered
-                if not should_sell and hold_hours and hold_hours > 2.0 and roi < -0.015:
+                # E. STALE LOSER EXIT — if losing >2% after 3h, cut early
+                # Data showed trades at -2% after hours never recovered
+                if not should_sell and hold_hours and hold_hours > 3.0 and roi < -0.02:
                     print(colored(f"  [STALE LOSER] {symbol} at {roi*100:.1f}% after {hold_hours:.1f}h. Cutting early.", "yellow"))
                     should_sell = True
                     exit_reason = 'stale_loser'
@@ -641,9 +661,12 @@ class StrategyEngine:
                             strategy=_strat_exit,
                             submitted_exit_price=current_price,
                         )
-                    self.execution_handler.submit_order(symbol, qty, 'sell', order_type='market', is_strategy_exit=True)
+                    # Use limit orders for profitable exits (saves 0.30% fee),
+                    # market orders for loss exits (need immediate execution)
+                    _exit_order_type = 'limit' if roi > 0 else 'market'
+                    self.execution_handler.submit_order(symbol, qty, 'sell', order_type=_exit_order_type, is_strategy_exit=True)
                     continue
-            
+
             # 3. STRATEGY SPECIFIC EXIT (Regime Aware) - Kept as backup signal
             try:
                 regime, _ = self.determine_regime(symbol, bars)
@@ -692,7 +715,8 @@ class StrategyEngine:
                          strategy=strategy_name,
                          submitted_exit_price=_curr_se,
                      )
-                 self.execution_handler.submit_order(symbol, qty, 'sell', order_type='market', is_strategy_exit=True, strategy_name=strategy_name)
+                 _se_otype = 'limit' if (_pnl_pct_se and _pnl_pct_se > 0) else 'market'
+                 self.execution_handler.submit_order(symbol, qty, 'sell', order_type=_se_otype, is_strategy_exit=True, strategy_name=strategy_name)
                  continue
         
         # 2. SCAN OPPORTUNITIES WITH STRATEGY CONFIRMATION

@@ -45,9 +45,10 @@ class Config:
     }
     
     # ─── COMMISSION & FEES (Limit Orders = Maker Rate) ───
-    FEE_RATE = 0.0026       # 0.26% taker fee per side (market orders)
-    ROUND_TRIP_FEE = 0.0052 # 0.52% total (buy taker + sell taker)
-    DEFAULT_ORDER_TYPE = 'market'  # was 'limit' — limit orders at bid often sit unfilled; $0.015 taker fee difference is negligible on $15 trades
+    FEE_RATE = 0.003        # 0.30% maker fee per side (actual Kraken rate for this account)
+    ROUND_TRIP_FEE = 0.006  # 0.60% total (maker both sides)
+    TAKER_FEE_RATE = 0.006  # 0.60% taker fee (used for stop-loss market sells)
+    DEFAULT_ORDER_TYPE = 'limit'  # CRITICAL: limit orders = 0.30% maker vs 0.60% taker — halves fees
     
     # ─── RISK:REWARD ───
     # 2.5:1 ratio → break-even win rate = 28.6%.
@@ -58,7 +59,7 @@ class Config:
     # normal volatility before mean-reversion strategies can work.
     STOP_LOSS = 0.035       # 3.5% hard stop (was 4% — tightened slightly, 12h losses showed trades rarely recovered past -2%)
     TAKE_PROFIT = 0.08      # 8% target (maintains 2.3:1 R:R)
-    MIN_PROFIT_THRESHOLD = 0.01   # 1% min to sell (lowered — take small wins instead of letting them reverse)
+    MIN_PROFIT_THRESHOLD = 0.008  # 0.8% min to sell (clears 0.60% round-trip maker fees + small buffer)
 
     # ─── KILL SWITCH & DAILY LIMITS ───
     MAX_DRAWDOWN = 0.20           # 20% max drawdown
