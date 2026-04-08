@@ -241,18 +241,20 @@ def _send_daily_summary():
         equity_cad  = equity * cad_rate
         cash_cad    = usd_cash * cad_rate
 
-        # ── Session P&L ───────────────────────────────────────────
-        starting_equity = equity
+        # ── 24h P&L (rolling daily, like trading charts) ──────────
+        daily_equity_ref = equity
         session_file = os.path.join(base, 'data', 'session.json')
         if os.path.exists(session_file):
             try:
                 with open(session_file) as f:
-                    starting_equity = json.load(f).get('starting_equity', equity)
+                    _sdata = json.load(f)
+                # Use daily_equity (snapshot from start of today) for 24h P&L
+                daily_equity_ref = _sdata.get('daily_equity', _sdata.get('starting_equity', equity))
             except Exception:
                 pass
 
-        session_pnl     = equity - starting_equity
-        session_pnl_pct = (session_pnl / starting_equity * 100) if starting_equity else 0
+        session_pnl     = equity - daily_equity_ref
+        session_pnl_pct = (session_pnl / daily_equity_ref * 100) if daily_equity_ref else 0
         pnl_sign        = '+' if session_pnl >= 0 else ''
         pnl_emoji       = '📈' if session_pnl >= 0 else '📉'
 
@@ -275,7 +277,7 @@ def _send_daily_summary():
             f"",
             f"💰 <b>EQUITY</b>",
             f"  USD: <b>${equity:,.2f}</b>   CAD: <b>${equity_cad:,.2f}</b>",
-            f"  Session start: ${starting_equity:,.2f}",
+            f"  24h open: ${daily_equity_ref:,.2f}",
             f"  {pnl_emoji} Net P&L: {pnl_sign}${session_pnl:.2f} ({pnl_sign}{session_pnl_pct:.2f}%)",
             f"",
         ]

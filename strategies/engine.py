@@ -188,10 +188,39 @@ class StrategyEngine:
         import json, os
         os.makedirs('data', exist_ok=True)
         try:
+            # Preserve existing fields (daily_equity, etc.)
+            existing = {}
+            if os.path.exists('data/session.json'):
+                with open('data/session.json', 'r') as f:
+                    existing = json.load(f)
+            existing['starting_equity'] = equity
             with open('data/session.json', 'w') as f:
-                json.dump({'starting_equity': equity}, f, indent=2)
+                json.dump(existing, f, indent=2)
         except Exception as e:
             print(f"  [SESSION] Warning: could not save starting_equity: {e}")
+
+    def _save_daily_equity_snapshot(self, equity):
+        """Save a daily equity snapshot for 24h P&L tracking in Telegram reports.
+        Updates once per day (when the stored date differs from today)."""
+        import json, os, datetime
+        session_file = 'data/session.json'
+        today = datetime.date.today().isoformat()
+        try:
+            existing = {}
+            if os.path.exists(session_file):
+                with open(session_file, 'r') as f:
+                    existing = json.load(f)
+            last_date = existing.get('daily_equity_date')
+            if last_date != today:
+                # Roll: yesterday's equity becomes the reference for today's P&L
+                existing['daily_equity'] = existing.get('pending_daily_equity', equity)
+                existing['daily_equity_date'] = today
+            # Always store current equity as pending for tomorrow's reference
+            existing['pending_daily_equity'] = equity
+            with open(session_file, 'w') as f:
+                json.dump(existing, f, indent=2)
+        except Exception as e:
+            print(f"  [SESSION] Warning: could not save daily equity snapshot: {e}")
 
     def _calculate_equity(self):
         """Calculate total account equity in USD."""
@@ -413,6 +442,9 @@ class StrategyEngine:
                 self.starting_equity = current_equity
                 self._save_starting_equity(current_equity)
                 print(f"  [EQUITY] Starting equity recorded: ${current_equity:.2f}")
+
+            # Save daily equity snapshot for 24h P&L tracking in Telegram reports
+            self._save_daily_equity_snapshot(current_equity)
 
             if self.starting_equity > 0:
                 drawdown = (self.starting_equity - current_equity) / self.starting_equity
