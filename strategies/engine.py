@@ -336,26 +336,68 @@ class StrategyEngine:
         return regime, meta
 
     def check_global_trend(self):
+        """Backward-compat wrapper — returns 'BEARISH' / 'BULLISH' / 'NEUTRAL'."""
+        gauge = self.compute_market_gauge()
+        return gauge['label']
+
+    def compute_market_gauge(self):
         """
-        Checks Market Breadth (BTC + ETH) to determine if the market is safe.
+        Rich market context from BTC + ETH + SOL.
+        Returns dict with:
+          label:         'BEARISH' / 'BULLISH' / 'NEUTRAL'
+          strength:      -100 to +100 (negative = bearish, positive = bullish)
+          min_dip_pct:   minimum distance below SMA20 to allow a buy
+          require_green: whether to require a green confirmation candle
+          detail:        human-readable string for logging
         """
+        scores = []   # one per reference coin
+        details = []
         try:
-            trends = []
-            for coin in ['BTC/USD', 'ETH/USD']:
+            for coin, weight in [('BTC/USD', 0.45), ('ETH/USD', 0.35), ('SOL/USD', 0.20)]:
                 bars = self.data_handler.get_historical_data(coin, timeframe='1h', limit=50)
-                if bars.empty: continue
-                
-                current_price = bars['close'].iloc[-1]
-                sma_20 = bars['close'].rolling(window=20).mean().iloc[-1]
-                
-                trends.append('BEARISH' if current_price < sma_20 else 'BULLISH')
-            
-            if not trends: return "NEUTRAL"
-            if all(t == 'BEARISH' for t in trends): return "BEARISH"
-            return "BULLISH"
+                if bars.empty:
+                    continue
+                price = bars['close'].iloc[-1]
+                sma20 = bars['close'].rolling(window=20).mean().iloc[-1]
+                # Distance from SMA as % (positive = above, negative = below)
+                dist_pct = (price - sma20) / sma20 * 100
+
+                # Recent momentum: last-4-candle trend
+                last4 = bars['close'].iloc[-4:].tolist()
+                mom = (last4[-1] - last4[0]) / last4[0] * 100 if last4[0] else 0
+
+                # Coin score: blend of position vs SMA and short-term momentum
+                # dist_pct capped to [-5, +5], mom capped to [-3, +3]
+                capped_dist = max(-5, min(5, dist_pct))
+                capped_mom = max(-3, min(3, mom))
+                coin_score = (capped_dist * 12) + (capped_mom * 10)  # range ~ -90 to +90
+                scores.append((coin.split('/')[0], coin_score * weight, dist_pct, mom))
+                details.append(f"{coin.split('/')[0]}:{dist_pct:+.1f}%SMA,{mom:+.1f}%mom")
         except Exception as e:
-            print(f"Global trend check failed: {e}")
-            return "NEUTRAL"
+            print(f"  Market gauge error: {e}")
+
+        if not scores:
+            return {'label': 'NEUTRAL', 'strength': 0, 'min_dip_pct': 0.008,
+                    'require_green': False, 'detail': 'no data'}
+
+        strength = sum(s for _, s, _, _ in scores)  # weighted sum, ~ -100 to +100
+        strength = max(-100, min(100, strength))
+
+        # Adaptive thresholds based on market strength
+        # Dip filter is the primary gate (data: 0.8% dip → 71% WR, 1.0% → 83%)
+        # Green candle only in strong bear (too strict otherwise — blocks winners)
+        if strength > 30:
+            label, min_dip, req_green = 'BULLISH', 0.005, False    # bull: mild dip ok
+        elif strength > 0:
+            label, min_dip, req_green = 'BULLISH', 0.007, False    # mild bull
+        elif strength > -30:
+            label, min_dip, req_green = 'BEARISH', 0.008, False    # mild bear: need real dip
+        else:
+            label, min_dip, req_green = 'BEARISH', 0.012, True     # strong bear: deep dips + green candle
+
+        detail = f"mkt={strength:+.0f} ({', '.join(details)}) → dip≥{min_dip*100:.1f}%{'🟢' if req_green else ''}"
+        return {'label': label, 'strength': strength, 'min_dip_pct': min_dip,
+                'require_green': req_green, 'detail': detail}
 
     def _quick_indicators(self, bars):
         """Extract a snapshot of key indicators from bars for audit logging."""
@@ -489,8 +531,9 @@ class StrategyEngine:
             print(colored("  [PAPER] Running in PAPER TRADING mode — no real orders will be placed.", "magenta"))
         
         buy_signals = []
-        global_trend = self.check_global_trend()
-        print(f"  [GLOBAL] Market Context: {colored(global_trend, 'red' if global_trend=='BEARISH' else 'green')}")
+        _market_gauge = self.compute_market_gauge()
+        global_trend = _market_gauge['label']
+        print(f"  [MARKET] {colored(_market_gauge['detail'], 'red' if global_trend=='BEARISH' else 'green')}")
         
         # 1. MANAGE POSITIONS
         positions = self.execution_handler.get_positions()
@@ -653,22 +696,26 @@ class StrategyEngine:
                         should_sell = True
                         exit_reason = 'bear_profit_take'
 
-                # E. STALE LOSER EXIT — if losing >2% after 3h, cut early
-                # Data showed trades at -2% after hours never recovered
-                if not should_sell and hold_hours and hold_hours > 3.0 and roi < -0.02:
-                    print(colored(f"  [STALE LOSER] {symbol} at {roi*100:.1f}% after {hold_hours:.1f}h. Cutting early.", "yellow"))
-                    should_sell = True
-                    exit_reason = 'stale_loser'
+                # E. MOMENTUM CHECK — if not profitable after 1h, the thesis is broken.
+                # Data: 11 trades held 3-6h had 9% win rate. Trades that work win in <2h.
+                # Tier 1: any loss after 1h → cut (catches -0.2% drifters early)
+                # Tier 2: still negative after 30min AND losing momentum → cut
+                if not should_sell and hold_hours:
+                    if hold_hours > 1.0 and roi < 0:
+                        print(colored(f"  [MOMENTUM EXIT] {symbol} at {roi*100:.1f}% after {hold_hours:.1f}h. Thesis broken.", "yellow"))
+                        should_sell = True
+                        exit_reason = 'momentum_exit'
+                    elif hold_hours > 0.5 and roi < -0.01:
+                        # Down >1% after 30min — strong negative signal
+                        print(colored(f"  [EARLY CUT] {symbol} at {roi*100:.1f}% after {hold_hours:.1f}h. Cutting early.", "yellow"))
+                        should_sell = True
+                        exit_reason = 'early_cut'
 
-                # F. TIME-BASED EXIT (last resort)
-                if not should_sell and entry_time and hasattr(entry_time, 'timestamp'):
-                    if hasattr(entry_time, 'timestamp'):
-                        now = pd.Timestamp.now()
-                        if (now - entry_time).total_seconds() > (Config.MAX_HOLD_TIME_HOURS * 3600):
-                             print(colored(f"  [TIME EXIT] {symbol} held > {Config.MAX_HOLD_TIME_HOURS}h. Closing.", "yellow"))
-                             should_sell = True
-                             if exit_reason is None:
-                                 exit_reason = 'time_exit'
+                # F. TIME-BASED EXIT (safety net — should rarely trigger now)
+                if not should_sell and hold_hours and hold_hours > Config.MAX_HOLD_TIME_HOURS:
+                    print(colored(f"  [TIME EXIT] {symbol} held > {Config.MAX_HOLD_TIME_HOURS}h. Closing.", "yellow"))
+                    should_sell = True
+                    exit_reason = 'time_exit'
 
                 if should_sell:
                     if audit_logger:
@@ -1008,8 +1055,35 @@ class StrategyEngine:
             _competing = [s for s in _all_buy_signals_this_target
                           if s['strategy'] != best_signal.get('strategy')]
             
-            print(colored(f"  >>> CONFIRMED BUY: {symbol} | Strategy: {best_signal['strategy']} ({best_signal['signal']}) | Score: {best_signal['score']} | Regime: {regime}", "green", attrs=['bold']))
-            
+            # ─── ENTRY QUALITY GATE (data-driven filters) ───
+            # Winners buy deep dips (avg -0.9% below SMA20).
+            # Losers buy near the SMA (avg -0.3%). Filter weak entries.
+            _eq_price = bars['close'].iloc[-1]
+            _eq_sma20 = bars['close'].rolling(window=20).mean().iloc[-1]
+            _eq_dip = (_eq_sma20 - _eq_price) / _eq_sma20 if _eq_sma20 else 0  # positive = below SMA
+            _eq_green = bars['close'].iloc[-1] > bars['open'].iloc[-1]  # current candle is green
+            _eq_vol_avg = bars['volume'].rolling(window=20).mean().iloc[-1] if 'volume' in bars else 1
+            _eq_vol_cur = bars['volume'].iloc[-1] if 'volume' in bars else 1
+            _eq_vol_ratio = _eq_vol_cur / _eq_vol_avg if _eq_vol_avg > 0 else 0
+
+            # 1. Minimum dip depth (adaptive to market conditions)
+            _min_dip = _market_gauge['min_dip_pct']
+            if _eq_dip < _min_dip:
+                print(f"    > {symbol}: dip {_eq_dip*100:.2f}% < min {_min_dip*100:.1f}% (too close to SMA). SKIP.")
+                continue
+
+            # 2. Green candle confirmation in bear markets
+            if _market_gauge['require_green'] and not _eq_green:
+                print(f"    > {symbol}: bear market requires green candle confirmation. SKIP.")
+                continue
+
+            # 3. Minimum volume floor (no dead markets)
+            if _eq_vol_ratio < 0.3:
+                print(f"    > {symbol}: vol ratio {_eq_vol_ratio:.2f} < 0.3 (dead volume). SKIP.")
+                continue
+
+            print(colored(f"  >>> CONFIRMED BUY: {symbol} | Strategy: {best_signal['strategy']} ({best_signal['signal']}) | Score: {best_signal['score']} | Regime: {regime} | Dip: {_eq_dip*100:.1f}% | Vol: {_eq_vol_ratio:.1f}x", "green", attrs=['bold']))
+
             price = self.data_handler.get_latest_price(symbol)
             if not price: continue
 

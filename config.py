@@ -67,7 +67,7 @@ class Config:
     MAX_DAILY_FEE_BUDGET = 5.00   # Stop if fees exceed $5.00
 
     # ─── ADVANCED RISK CONTROLS ───
-    MAX_HOLD_TIME_HOURS = 6       # 6h (was 12h — data shows losers at 12h never recover; 15m candle signals are stale by then)
+    MAX_HOLD_TIME_HOURS = 2       # 2h safety net (momentum_exit at 1h catches most; data: 3h+ holds have 9% win rate)
     TRADING_HOURS = (0, 24)       # 24/7 Crypto Markets
     TREND_FILTER = True           # Only buy if price > SMA20
     
