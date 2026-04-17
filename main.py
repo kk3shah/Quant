@@ -320,13 +320,77 @@ def _send_daily_summary():
         else:
             lines.append(f"  ✅ Ready to enter (alloc ${alloc:.2f})")
 
-        # ── Daily activity ────────────────────────────────────────
+        # ── Daily activity + performance stats ───────────────────
         lines += [
             f"",
             f"📈 <b>TODAY</b>",
             f"  Trades executed: {day_trades}",
             f"  Fees paid: ${day_fees:.4f}",
         ]
+
+        # ── Performance tracker (win rate, P&L, entry gate, exit breakdown) ─
+        try:
+            import audit_logger as _al
+            _ps = _al.get_perf_stats()
+            _wins   = _ps.get('wins', 0)
+            _losses = _ps.get('losses', 0)
+            _total_closed = _wins + _losses
+            _pnl_usd = _ps.get('total_pnl_usd', 0.0)
+            _fees    = _ps.get('total_fees_usd', 0.0)
+            _wr      = (_wins / _total_closed * 100) if _total_closed > 0 else 0
+            _avg_pnl = (_pnl_usd / _total_closed) if _total_closed > 0 else 0
+            _gate_pass  = _ps.get('entry_gate_passed', 0)
+            _gate_block = _ps.get('entry_gate_blocked', 0)
+            _gate_total = _gate_pass + _gate_block
+            _gate_pct   = (_gate_pass / _gate_total * 100) if _gate_total > 0 else 0
+            _block_reasons = _ps.get('gate_block_reasons', {})
+            _exit_reasons  = _ps.get('exit_reasons', {})
+            _strat_stats   = _ps.get('strategy_stats', {})
+
+            if _total_closed > 0:
+                _pnl_sign = '+' if _pnl_usd >= 0 else ''
+                lines += [
+                    f"",
+                    f"🎯 <b>TRADE PERFORMANCE  (today)</b>",
+                    f"  Closed: {_total_closed}  |  ✅ {_wins}W  ❌ {_losses}L  |  WR: {_wr:.0f}%",
+                    f"  Net P&L: <b>{_pnl_sign}${_pnl_usd:.4f}</b>  |  Avg/trade: {_pnl_sign}${_avg_pnl:.4f}",
+                ]
+                if _fees > 0:
+                    lines.append(f"  Fees paid: ${_fees:.4f}")
+            else:
+                lines += [f"", f"🎯 <b>TRADE PERFORMANCE</b>  No closed trades today"]
+
+            # Entry gate stats
+            if _gate_total > 0:
+                lines += [
+                    f"",
+                    f"🚦 <b>ENTRY GATE</b>  ({_gate_pass} passed / {_gate_total} evaluated = {_gate_pct:.0f}%)",
+                ]
+                if _block_reasons:
+                    top_blocks = sorted(_block_reasons.items(), key=lambda x: -x[1])[:4]
+                    for reason, count in top_blocks:
+                        lines.append(f"  ✗ {reason}: {count}x")
+
+            # Exit reason breakdown
+            if _exit_reasons:
+                lines += [f"", f"🚪 <b>EXIT REASONS</b>"]
+                for reason, count in sorted(_exit_reasons.items(), key=lambda x: -x[1]):
+                    lines.append(f"  {reason}: {count}x")
+
+            # Per-strategy breakdown
+            if _strat_stats:
+                lines += [f"", f"📊 <b>BY STRATEGY</b>"]
+                for strat, ss in sorted(_strat_stats.items()):
+                    sw = ss.get('wins', 0)
+                    sl = ss.get('losses', 0)
+                    sp = ss.get('pnl_usd', 0.0)
+                    st = sw + sl
+                    if st > 0:
+                        sp_sign = '+' if sp >= 0 else ''
+                        lines.append(f"  {strat}: {sw}W/{sl}L  {sp_sign}${sp:.4f}")
+
+        except Exception as _pe:
+            lines.append(f"  [perf stats error: {_pe}]")
 
         # ── Optimizer status ──────────────────────────────────────────────
         try:

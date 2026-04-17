@@ -396,6 +396,21 @@ class StrategyEngine:
             label, min_dip, req_green = 'BEARISH', 0.012, True     # strong bear: deep dips + green candle
 
         detail = f"mkt={strength:+.0f} ({', '.join(details)}) → dip≥{min_dip*100:.1f}%{'🟢' if req_green else ''}"
+
+        # ─── AUDIT: log market gauge snapshot ───
+        if audit_logger:
+            _coin_data = {s[0]: (s[2], s[3]) for s in scores}  # {coin: (dist_pct, mom)}
+            audit_logger.log_market_gauge(
+                strength=strength, label=label, min_dip_pct=min_dip,
+                require_green=req_green,
+                btc_dist=_coin_data.get('BTC', (None, None))[0],
+                btc_mom=_coin_data.get('BTC', (None, None))[1],
+                eth_dist=_coin_data.get('ETH', (None, None))[0],
+                eth_mom=_coin_data.get('ETH', (None, None))[1],
+                sol_dist=_coin_data.get('SOL', (None, None))[0],
+                sol_mom=_coin_data.get('SOL', (None, None))[1],
+            )
+
         return {'label': label, 'strength': strength, 'min_dip_pct': min_dip,
                 'require_green': req_green, 'detail': detail}
 
@@ -573,18 +588,21 @@ class StrategyEngine:
         _cycle_signals = []  # {symbol, strategy, signal, score, regime}
 
         # ─── CANCEL STALE OPEN ORDERS (limit buys/sells that didn't fill) ───
-        # Prevents locked-up cash from unfilled limit orders
+        # BUY orders: 15 min timeout (3 cycles). Limit buys at bid need time to fill —
+        #   cancelling after 5 min (1 cycle) meant zero fills for any order that
+        #   didn't fill instantly, especially in fast-moving breakout scenarios.
+        # SELL orders: 10 min timeout (2 cycles). Exits need to execute promptly but
+        #   can survive one retry cycle in case of thin liquidity.
         try:
             _open_orders = self.execution_handler.exchange.fetch_open_orders()
             if _open_orders:
-                import time as _time
                 for _oo in _open_orders:
                     _oo_age_min = 0
                     if _oo.get('datetime'):
                         _oo_age_min = (pd.Timestamp.now(tz='UTC') - pd.Timestamp(_oo['datetime'])).total_seconds() / 60
-                    # Cancel any order older than 5 minutes (one full cycle)
-                    if _oo_age_min > 5:
-                        print(colored(f"  [STALE ORDER] Cancelling {_oo['side']} {_oo['symbol']} ({_oo_age_min:.0f}min old)", "yellow"))
+                    _stale_threshold = 15 if _oo.get('side') == 'buy' else 10
+                    if _oo_age_min > _stale_threshold:
+                        print(colored(f"  [STALE ORDER] Cancelling {_oo['side']} {_oo['symbol']} ({_oo_age_min:.0f}min old, >{_stale_threshold}min limit)", "yellow"))
                         try:
                             self.execution_handler.exchange.cancel_order(_oo['id'])
                         except Exception:
@@ -645,6 +663,10 @@ class StrategyEngine:
                              peak_price=_peak_sl,
                              strategy=_strat_sl,
                              submitted_exit_price=current_price,
+                         )
+                         audit_logger.record_exit(
+                             strategy=_strat_sl, exit_reason='stop_loss',
+                             pnl_usd=round(qty * (current_price - entry_price), 6),
                          )
                      self.execution_handler.submit_order(symbol, qty, 'sell', order_type='market', is_strategy_exit=True)
                      continue
@@ -740,6 +762,10 @@ class StrategyEngine:
                             strategy=_strat_exit,
                             submitted_exit_price=current_price,
                         )
+                        audit_logger.record_exit(
+                            strategy=_strat_exit, exit_reason=exit_reason or 'unknown',
+                            pnl_usd=round(qty * (current_price - entry_price), 6),
+                        )
                     # Use limit orders for profitable exits (saves 0.30% fee),
                     # market orders for loss exits (need immediate execution)
                     _exit_order_type = 'limit' if roi > 0 else 'market'
@@ -793,6 +819,10 @@ class StrategyEngine:
                          peak_price=_peak_se,
                          strategy=strategy_name,
                          submitted_exit_price=_curr_se,
+                     )
+                     audit_logger.record_exit(
+                         strategy=strategy_name, exit_reason='strategy_signal',
+                         pnl_usd=_pnl_usd_se,
                      )
                  _se_otype = 'limit' if (_pnl_pct_se and _pnl_pct_se > 0) else 'market'
                  self.execution_handler.submit_order(symbol, qty, 'sell', order_type=_se_otype, is_strategy_exit=True, strategy_name=strategy_name)
@@ -1055,32 +1085,75 @@ class StrategyEngine:
             _competing = [s for s in _all_buy_signals_this_target
                           if s['strategy'] != best_signal.get('strategy')]
             
-            # ─── ENTRY QUALITY GATE (data-driven filters) ───
-            # Winners buy deep dips (avg -0.9% below SMA20).
-            # Losers buy near the SMA (avg -0.3%). Filter weak entries.
-            _eq_price = bars['close'].iloc[-1]
-            _eq_sma20 = bars['close'].rolling(window=20).mean().iloc[-1]
-            _eq_dip = (_eq_sma20 - _eq_price) / _eq_sma20 if _eq_sma20 else 0  # positive = below SMA
-            _eq_green = bars['close'].iloc[-1] > bars['open'].iloc[-1]  # current candle is green
+            # ─── ENTRY QUALITY GATE (strategy-aware filters) ───
+            # KEY FIX: dip filter only applies to dip-buying strategies.
+            # Breakout strategies (MOMENTUM, VOL_*) fire when price > SMA20 —
+            # applying a dip filter to them guarantees zero entries in bull/volatile regimes.
+            _eq_price   = bars['close'].iloc[-1]
+            _eq_open    = bars['open'].iloc[-1]
+            _eq_sma20   = bars['close'].rolling(window=20).mean().iloc[-1]
+            _eq_dip     = (_eq_sma20 - _eq_price) / _eq_sma20 if _eq_sma20 else 0  # positive = price below SMA
+            _eq_green   = _eq_price > _eq_open   # current candle green
             _eq_vol_avg = bars['volume'].rolling(window=20).mean().iloc[-1] if 'volume' in bars else 1
             _eq_vol_cur = bars['volume'].iloc[-1] if 'volume' in bars else 1
-            _eq_vol_ratio = _eq_vol_cur / _eq_vol_avg if _eq_vol_avg > 0 else 0
+            _eq_vol_ratio = _eq_vol_cur / _eq_vol_avg if (_eq_vol_avg and _eq_vol_avg > 0) else 1.0
 
-            # 1. Minimum dip depth (adaptive to market conditions)
-            _min_dip = _market_gauge['min_dip_pct']
-            if _eq_dip < _min_dip:
-                print(f"    > {symbol}: dip {_eq_dip*100:.2f}% < min {_min_dip*100:.1f}% (too close to SMA). SKIP.")
+            _BREAKOUT_STRATEGIES = {'MOMENTUM', 'VOL_BREAKOUT', 'VOL_SQUEEZE', 'TREND_SURFER', 'SUPERTREND'}
+            _winning_strat = best_signal['strategy']
+            _gate_block_reason = None
+
+            if _winning_strat in _BREAKOUT_STRATEGIES:
+                # BREAKOUT GATE: price is moving up — we need momentum, not a dip
+                # 1. Skip breakouts in bearish markets (don't chase pumps during downtrends)
+                if _market_gauge['strength'] < -20:
+                    _gate_block_reason = 'bearish_market_no_breakouts'
+                    print(f"    > {symbol}: bearish market ({_market_gauge['strength']:+.0f}) — skipping breakout entry. SKIP.")
+                # 2. Require green candle (can't buy a breakout on a red candle)
+                elif not _eq_green:
+                    _gate_block_reason = 'breakout_needs_green_candle'
+                    print(f"    > {symbol}: breakout strategy needs green candle. SKIP.")
+                # 3. Minimum volume floor (breakout needs at least average volume)
+                elif _eq_vol_ratio < 0.6:
+                    _gate_block_reason = 'breakout_low_volume'
+                    print(f"    > {symbol}: breakout vol {_eq_vol_ratio:.2f}x < 0.6x avg — no conviction. SKIP.")
+            else:
+                # DIP GATE: mean-reversion entries must be below SMA by market-adaptive amount
+                _min_dip = _market_gauge['min_dip_pct']
+                if _eq_dip < _min_dip:
+                    _gate_block_reason = 'dip_too_shallow'
+                    print(f"    > {symbol}: dip {_eq_dip*100:.2f}% < min {_min_dip*100:.1f}% (too close to SMA). SKIP.")
+                elif _market_gauge['require_green'] and not _eq_green:
+                    _gate_block_reason = 'strong_bear_needs_green'
+                    print(f"    > {symbol}: strong bear market requires green candle confirmation. SKIP.")
+                elif _eq_vol_ratio < 0.3:
+                    _gate_block_reason = 'dead_volume'
+                    print(f"    > {symbol}: vol ratio {_eq_vol_ratio:.2f} < 0.3 (dead volume). SKIP.")
+
+            if _gate_block_reason:
+                if audit_logger:
+                    audit_logger.log_entry_gate(
+                        symbol=symbol, strategy=_winning_strat, passed=False,
+                        dip_pct=_eq_dip, min_dip_pct=_market_gauge['min_dip_pct'],
+                        vol_ratio=_eq_vol_ratio, green_candle=_eq_green,
+                        require_green=_market_gauge['require_green'],
+                        market_strength=_market_gauge['strength'],
+                        regime=regime, block_reason=_gate_block_reason,
+                        score=best_signal.get('score'),
+                    )
+                    audit_logger.record_entry_gate(passed=False, block_reason=_gate_block_reason)
                 continue
 
-            # 2. Green candle confirmation in bear markets
-            if _market_gauge['require_green'] and not _eq_green:
-                print(f"    > {symbol}: bear market requires green candle confirmation. SKIP.")
-                continue
-
-            # 3. Minimum volume floor (no dead markets)
-            if _eq_vol_ratio < 0.3:
-                print(f"    > {symbol}: vol ratio {_eq_vol_ratio:.2f} < 0.3 (dead volume). SKIP.")
-                continue
+            # Gate passed — log it
+            if audit_logger:
+                audit_logger.log_entry_gate(
+                    symbol=symbol, strategy=_winning_strat, passed=True,
+                    dip_pct=_eq_dip, min_dip_pct=_market_gauge['min_dip_pct'],
+                    vol_ratio=_eq_vol_ratio, green_candle=_eq_green,
+                    require_green=_market_gauge['require_green'],
+                    market_strength=_market_gauge['strength'],
+                    regime=regime, score=best_signal.get('score'),
+                )
+                audit_logger.record_entry_gate(passed=True)
 
             print(colored(f"  >>> CONFIRMED BUY: {symbol} | Strategy: {best_signal['strategy']} ({best_signal['signal']}) | Score: {best_signal['score']} | Regime: {regime} | Dip: {_eq_dip*100:.1f}% | Vol: {_eq_vol_ratio:.1f}x", "green", attrs=['bold']))
 
@@ -1140,6 +1213,7 @@ class StrategyEngine:
                         atr_scale=atr_scale,
                         competing_signals=_competing,
                     )
+                    audit_logger.record_entry(strategy=best_signal['strategy'])
                 trades_made += 1
                 self.daily_trade_count += 1
                 cash -= allocation_per_trade

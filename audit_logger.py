@@ -275,6 +275,46 @@ def log_trade_exit(symbol, exit_reason, exit_price, entry_price, pnl_pct, pnl_us
     })
 
 
+def log_entry_gate(symbol, strategy, passed, dip_pct, min_dip_pct, vol_ratio,
+                   green_candle, require_green, market_strength, regime,
+                   block_reason=None, score=None):
+    """Log every entry quality gate decision — both passes and blocks.
+    This is the key dataset for tuning entry filters post-session."""
+    _log({
+        'event': 'ENTRY_GATE',
+        'symbol': symbol,
+        'strategy': strategy,
+        'passed': passed,
+        'block_reason': block_reason,
+        'score': _r(score),
+        'dip_pct': _r(dip_pct, 4),
+        'min_dip_pct': _r(min_dip_pct, 4),
+        'vol_ratio': _r(vol_ratio, 3),
+        'green_candle': green_candle,
+        'require_green': require_green,
+        'market_strength': _r(market_strength, 1),
+        'regime': regime,
+    })
+
+
+def log_market_gauge(strength, label, min_dip_pct, require_green,
+                     btc_dist, btc_mom, eth_dist, eth_mom, sol_dist, sol_mom):
+    """Log market gauge snapshot each cycle for trend analysis."""
+    _log({
+        'event': 'MARKET_GAUGE',
+        'strength': _r(strength, 1),
+        'label': label,
+        'min_dip_pct': _r(min_dip_pct, 4),
+        'require_green': require_green,
+        'btc_dist_pct': _r(btc_dist, 2),
+        'btc_mom_pct': _r(btc_mom, 2),
+        'eth_dist_pct': _r(eth_dist, 2),
+        'eth_mom_pct': _r(eth_mom, 2),
+        'sol_dist_pct': _r(sol_dist, 2),
+        'sol_mom_pct': _r(sol_mom, 2),
+    })
+
+
 def log_rejected_order(symbol, side, reason):
     """Log every order rejected by the exchange."""
     _log({
@@ -283,3 +323,101 @@ def log_rejected_order(symbol, side, reason):
         'side': side,
         'reason': str(reason),
     })
+
+
+# ─── PERFORMANCE TRACKER ───
+# Accumulates trade stats across cycles for Telegram reporting.
+# Stored in data/perf_stats.json — reset daily.
+
+_PERF_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'perf_stats.json')
+
+
+def _load_perf():
+    try:
+        with open(_PERF_FILE, 'r') as f:
+            data = json.load(f)
+        # Reset if date changed
+        if data.get('date') != datetime.date.today().isoformat():
+            return _empty_perf()
+        return data
+    except Exception:
+        return _empty_perf()
+
+
+def _empty_perf():
+    return {
+        'date': datetime.date.today().isoformat(),
+        'trades_entered': 0,
+        'trades_exited': 0,
+        'wins': 0,
+        'losses': 0,
+        'total_pnl_usd': 0.0,
+        'total_fees_usd': 0.0,
+        'exit_reasons': {},       # {reason: count}
+        'strategy_stats': {},     # {strategy: {entered, wins, losses, pnl_usd}}
+        'entry_gate_passed': 0,
+        'entry_gate_blocked': 0,
+        'gate_block_reasons': {}, # {reason: count}
+    }
+
+
+def _save_perf(data):
+    try:
+        os.makedirs(os.path.dirname(_PERF_FILE), exist_ok=True)
+        with open(_PERF_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+def record_entry(strategy):
+    """Call after a successful trade entry."""
+    p = _load_perf()
+    p['trades_entered'] += 1
+    s = p['strategy_stats'].setdefault(strategy, {'entered': 0, 'wins': 0, 'losses': 0, 'pnl_usd': 0.0})
+    s['entered'] += 1
+    _save_perf(p)
+
+
+def record_exit(strategy, exit_reason, pnl_usd):
+    """Call after a trade exit with P&L."""
+    p = _load_perf()
+    p['trades_exited'] += 1
+    pnl = float(pnl_usd) if pnl_usd else 0.0
+    p['total_pnl_usd'] += pnl
+    if pnl >= 0:
+        p['wins'] += 1
+    else:
+        p['losses'] += 1
+    p['exit_reasons'][exit_reason] = p['exit_reasons'].get(exit_reason, 0) + 1
+    s = p['strategy_stats'].setdefault(strategy or 'UNKNOWN', {'entered': 0, 'wins': 0, 'losses': 0, 'pnl_usd': 0.0})
+    if pnl >= 0:
+        s['wins'] += 1
+    else:
+        s['losses'] += 1
+    s['pnl_usd'] += pnl
+    _save_perf(p)
+
+
+def record_fee(fee_usd):
+    """Accumulate fees paid."""
+    p = _load_perf()
+    p['total_fees_usd'] += float(fee_usd) if fee_usd else 0.0
+    _save_perf(p)
+
+
+def record_entry_gate(passed, block_reason=None):
+    """Accumulate entry gate pass/block stats."""
+    p = _load_perf()
+    if passed:
+        p['entry_gate_passed'] += 1
+    else:
+        p['entry_gate_blocked'] += 1
+        if block_reason:
+            p['gate_block_reasons'][block_reason] = p['gate_block_reasons'].get(block_reason, 0) + 1
+    _save_perf(p)
+
+
+def get_perf_stats():
+    """Return current day's performance stats for Telegram report."""
+    return _load_perf()
