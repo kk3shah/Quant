@@ -14,6 +14,53 @@ class ExecutionHandler:
     def __init__(self, exchange: ccxt.Exchange):
         self.exchange = exchange
 
+    def _is_filled(self, order):
+        status = (order or {}).get('status')
+        remaining = order.get('remaining') if order else None
+        filled = order.get('filled') if order else None
+        amount = order.get('amount') if order else None
+        if status in ('closed', 'filled'):
+            return True
+        try:
+            if remaining is not None and float(remaining) <= 0:
+                return True
+            if filled is not None and amount is not None and float(amount) > 0:
+                return float(filled) >= float(amount) * 0.999
+        except Exception:
+            pass
+        return False
+
+    def _refresh_order(self, order):
+        """Best-effort fetch of the current Kraken order status."""
+        if not order or not order.get('id'):
+            return order
+        try:
+            return self.exchange.fetch_order(order['id'], order.get('symbol')) or order
+        except Exception:
+            return order
+
+    def _order_fee_usd(self, order, fallback_qty=0.0, fallback_price=0.0):
+        fee_total = 0.0
+        for trade in (order or {}).get('trades') or []:
+            fee = trade.get('fee') or {}
+            try:
+                fee_total += float(fee.get('cost') or 0)
+            except Exception:
+                pass
+        if fee_total:
+            return fee_total
+
+        fee = (order or {}).get('fee') or {}
+        try:
+            return float(fee.get('cost') or 0)
+        except Exception:
+            pass
+
+        from config import Config
+        order_type = (order or {}).get('type')
+        rate = Config.TAKER_FEE_RATE if order_type == 'market' else Config.FEE_RATE
+        return float(fallback_qty or 0) * float(fallback_price or 0) * rate
+
     def get_account(self):
         """
         Returns the balance dictionary. 
@@ -97,7 +144,7 @@ class ExecutionHandler:
                     print(colored(f"  > [SWEEP] Found Profitable Position: {symbol} (+{roi*100:.2f}%). SELLING NOW.", "green"))
                     # Bypass the Profit Guard check inside submit_order strictly for this sweep?
                     # No, submit_order checks it anyway, but we pass 'market' so it should work.
-                    self.submit_order(symbol, qty, 'sell')
+                    self.submit_order(symbol, qty, 'sell', is_strategy_exit=True)
                 else:
                     print(f"  > {symbol} is currently {roi*100:.2f}% (Target: >{min_profit_pct*100:.2f}%). Holding.")
                     
@@ -233,12 +280,24 @@ class ExecutionHandler:
                     pass
 
             order = self.exchange.create_order(symbol, order_type, side, qty, price)
-            print(colored(f"Order executed: {order['id']}", "green"))
+            order = self._refresh_order(order)
+            if not self._is_filled(order) and (order_type == 'market' or side == 'sell'):
+                import time
+                for _ in range(3):
+                    time.sleep(1.0)
+                    order = self._refresh_order(order)
+                    if self._is_filled(order):
+                        break
+            filled = self._is_filled(order)
+            if filled:
+                print(colored(f"Order filled: {order['id']}", "green"))
+            else:
+                print(colored(f"Order submitted but not filled yet: {order['id']} ({order.get('status', 'open')})", "yellow"))
 
             # Fire-and-forget Telegram alerts
-            if notifier:
+            if notifier and filled:
                 try:
-                    exec_price = price or order.get('price') or 0
+                    exec_price = order.get('average') or order.get('price') or price or 0
                     if side == 'buy':
                         notifier.notify_trade_entry(
                             symbol=symbol,
@@ -266,9 +325,17 @@ class ExecutionHandler:
                 except Exception:
                     pass
 
-            # Record local state immediately
-            if not order.get('price'): order['price'] = price
-            self._update_local_state(order, strategy_name=strategy_name)
+            # Record local state only after a verified fill. Open limit orders are
+            # reconciled on later cycles by live balances, not optimistic intent.
+            if filled:
+                if not order.get('price'): order['price'] = price
+                self._update_local_state(order, strategy_name=strategy_name)
+                if audit_logger:
+                    audit_logger.record_fee(self._order_fee_usd(
+                        order,
+                        fallback_qty=order.get('filled') or qty,
+                        fallback_price=order.get('average') or order.get('price') or price,
+                    ))
 
             return order
         except ccxt.InvalidOrder as e:

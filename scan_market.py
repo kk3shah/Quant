@@ -79,6 +79,7 @@ def scan_market():
             and not any(s.split('/')[0] == sc for sc in STABLECOIN_PREFIXES)
             and not any(x in s for x in FIAT_SUFFIXES)
             and not any(s.startswith(f"{r}/") for r in restricted)
+            and s not in Config.BLOCKED_SYMBOLS
         ]
         
         print(f"  Scanning {len(universe)} USD pairs...")

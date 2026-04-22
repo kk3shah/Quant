@@ -12,6 +12,9 @@ __pycache__/
 # Large / generated data files
 data/audit_log.json
 data/targets.json
+data/real_trade_pnl.json
+data/realized_lots.csv
+data/open_lots.csv
 
 # Logs (Railway streams these natively)
 logs/

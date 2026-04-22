@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import json
+import os
 from datetime import date
 from termcolor import colored
 try:
@@ -118,6 +119,16 @@ class StrategyEngine:
 
         changes = []
 
+        def _last_buy_price(symbol):
+            try:
+                trades = self.execution_handler.exchange.fetch_my_trades(symbol, limit=100)
+                for trade in reversed(trades):
+                    if trade.get('side') == 'buy' and trade.get('symbol') == symbol:
+                        return trade.get('price'), trade.get('timestamp')
+            except Exception:
+                pass
+            return None, None
+
         # 1. Remove phantoms — positions tracked locally but not (or dust) on Kraken
         for symbol in list(pos_data.keys()):
             asset = symbol.split('/')[0]
@@ -146,16 +157,19 @@ class StrategyEngine:
                 value = qty * ticker['last']
                 if value < Config.MIN_POSITION_VALUE_USD:
                     continue
-                # Use current price as synthetic entry (best we can do without history)
+                # Prefer the real last buy from Kraken. If unavailable, do not invent
+                # a flat entry price; mark the basis unknown so P&L is not hidden.
+                entry_price, entry_time = _last_buy_price(symbol)
                 pos_data[symbol] = {
-                    'entry_price': ticker['last'],
-                    'entry_time': int(_time.time() * 1000),
-                    'strategy': 'RECONCILED',
+                    'entry_price': entry_price,
+                    'entry_time': entry_time or int(_time.time() * 1000),
+                    'strategy': 'RECONCILED' if entry_price else 'RECONCILED_UNKNOWN_BASIS',
                     'peak_price': ticker['last'],
+                    'unknown_basis': entry_price is None,
                 }
                 msg = (f"  [RECONCILE] Added untracked {symbol}: "
                        f"qty={qty:.4f}, price=${ticker['last']:.5f}, value=${value:.2f} "
-                       f"(entry_price set to current — stop-loss now active)")
+                       f"(entry_price={'Kraken last buy' if entry_price else 'UNKNOWN'})")
                 print(msg)
                 changes.append(msg)
             except Exception:
@@ -479,6 +493,10 @@ class StrategyEngine:
         
         from config import Config
 
+        # Reconcile each cycle so limit orders that filled after submission are
+        # tracked from real balances/fills instead of optimistic intent.
+        self._reconcile_positions()
+
         # ─── SELF-LEARNING: Load per-strategy thresholds from optimizer ───
         try:
             from strategies.optimizer import load_params as _load_opt_params
@@ -512,13 +530,7 @@ class StrategyEngine:
                     if not Config.PAPER_TRADING:
                         self.execution_handler.liquidate_all()
 
-                    # CRITICAL: Reset starting_equity to current after liquidation.
-                    # Otherwise the bot is permanently stuck: the old baseline is
-                    # unreachable, drawdown stays >20% forever, and the bot never
-                    # trades again. Accept the loss and restart from current equity.
-                    print(colored(f"  [KILL SWITCH] Resetting starting_equity: ${self.starting_equity:.2f} → ${current_equity:.2f}", "yellow"))
-                    self.starting_equity = current_equity
-                    self._save_starting_equity(current_equity)
+                    print(colored("  [KILL SWITCH] Trading halted. Baseline NOT reset; manual review required before resuming.", "yellow"))
 
                     # Alert Telegram
                     try:
@@ -530,17 +542,26 @@ class StrategyEngine:
                                         'text': (f"🚨 <b>KILL SWITCH fired</b>\n"
                                                  f"Drawdown: {drawdown*100:.1f}%\n"
                                                  f"Liquidated all positions.\n"
-                                                 f"Baseline reset: ${self.starting_equity:.2f}\n"
-                                                 f"Bot will resume trading next cycle.")},
+                                                 f"Baseline preserved: ${self.starting_equity:.2f}\n"
+                                                 f"New entries halted until manual review.")},
                                   timeout=10)
                     except Exception:
                         pass
                     return
         
         # ─── DAILY LIMITS CHECK ───
+        if audit_logger:
+            try:
+                self.daily_fee_total = audit_logger.get_perf_stats().get('total_fees_usd', self.daily_fee_total)
+            except Exception:
+                pass
+
         if self.daily_trade_count >= Config.MAX_DAILY_TRADES:
             print(colored(f"  [LIMIT] Daily trade limit reached ({self.daily_trade_count}/{Config.MAX_DAILY_TRADES}). Skipping buys.", "yellow"))
             # Still manage exits below, just skip new entries
+
+        if self.daily_fee_total >= Config.MAX_DAILY_FEE_BUDGET:
+            print(colored(f"  [LIMIT] Daily fee budget reached (${self.daily_fee_total:.2f}/${Config.MAX_DAILY_FEE_BUDGET:.2f}). Skipping buys.", "yellow"))
         
         if Config.PAPER_TRADING:
             print(colored("  [PAPER] Running in PAPER TRADING mode — no real orders will be placed.", "magenta"))
@@ -586,6 +607,35 @@ class StrategyEngine:
 
         # Signal stats accumulated during entry scan (populated below)
         _cycle_signals = []  # {symbol, strategy, signal, score, regime}
+
+        def _order_filled(order):
+            try:
+                return self.execution_handler._is_filled(order)
+            except Exception:
+                return (order or {}).get('status') in ('closed', 'filled')
+
+        def _log_verified_exit(symbol, qty, entry_price, exit_price, exit_reason,
+                               hold_hours, regime, strategy, detail, bars):
+            if not audit_logger:
+                return
+            pnl_usd = round(qty * (exit_price - entry_price), 6) if entry_price else None
+            pnl_pct = round((exit_price - entry_price) / entry_price * 100, 4) if entry_price else None
+            audit_logger.log_trade_exit(
+                symbol=symbol, exit_reason=exit_reason or 'unknown',
+                exit_price=exit_price, entry_price=entry_price,
+                pnl_pct=pnl_pct, pnl_usd=pnl_usd,
+                hold_duration_hours=hold_hours,
+                regime=regime, btc_trend=global_trend,
+                exit_detail=detail,
+                indicators_at_exit=self._quick_indicators(bars),
+                peak_price=self._get_peak_price(symbol),
+                strategy=strategy,
+                submitted_exit_price=exit_price,
+            )
+            audit_logger.record_exit(
+                strategy=strategy, exit_reason=exit_reason or 'unknown',
+                pnl_usd=pnl_usd,
+            )
 
         # ─── CANCEL STALE OPEN ORDERS (limit buys/sells that didn't fill) ───
         # BUY orders: 15 min timeout (3 cycles). Limit buys at bid need time to fill —
@@ -639,36 +689,24 @@ class StrategyEngine:
                 # 1. HARD STOP LOSS (Volatility Guard)
                 if roi < -Config.STOP_LOSS:
                      print(colored(f"  [STOP LOSS] {symbol} hit -{Config.STOP_LOSS*100}%. CUTTING LOSS.", "red", attrs=['bold']))
-                     if audit_logger:
-                         _et_sl = self.execution_handler.get_entry_time(symbol)
-                         _hh_sl = None
-                         try:
-                             if _et_sl and hasattr(_et_sl, 'timestamp'):
-                                 _hh_sl = (pd.Timestamp.now() - _et_sl).total_seconds() / 3600
-                         except Exception:
-                             pass
-                         _peak_sl = self._get_peak_price(symbol)
-                         _strat_sl = self.execution_handler.get_origin_strategy(symbol)
-                         _ind_exit = self._quick_indicators(bars)
-                         audit_logger.log_trade_exit(
-                             symbol=symbol, exit_reason='stop_loss',
-                             exit_price=current_price, entry_price=entry_price,
-                             pnl_pct=round(roi * 100, 4),
-                             pnl_usd=round(qty * (current_price - entry_price), 6),
-                             hold_duration_hours=_hh_sl,
-                             regime=regime if 'regime' in dir() else None,
-                             btc_trend=global_trend,
-                             exit_detail=f"Price {current_price:.5f} fell below entry {entry_price:.5f} by {abs(roi)*100:.2f}% (threshold {Config.STOP_LOSS*100}%)",
-                             indicators_at_exit=_ind_exit,
-                             peak_price=_peak_sl,
-                             strategy=_strat_sl,
-                             submitted_exit_price=current_price,
+                     _et_sl = self.execution_handler.get_entry_time(symbol)
+                     _hh_sl = None
+                     try:
+                         if _et_sl and hasattr(_et_sl, 'timestamp'):
+                             _hh_sl = (pd.Timestamp.now() - _et_sl).total_seconds() / 3600
+                     except Exception:
+                         pass
+                     _strat_sl = self.execution_handler.get_origin_strategy(symbol)
+                     _sl_order = self.execution_handler.submit_order(symbol, qty, 'sell', order_type='market', is_strategy_exit=True)
+                     if _order_filled(_sl_order):
+                         _log_verified_exit(
+                             symbol, qty, entry_price, current_price, 'stop_loss',
+                             _hh_sl, regime if 'regime' in dir() else None, _strat_sl,
+                             f"Price {current_price:.5f} fell below entry {entry_price:.5f} by {abs(roi)*100:.2f}% (threshold {Config.STOP_LOSS*100}%)",
+                             bars,
                          )
-                         audit_logger.record_exit(
-                             strategy=_strat_sl, exit_reason='stop_loss',
-                             pnl_usd=round(qty * (current_price - entry_price), 6),
-                         )
-                     self.execution_handler.submit_order(symbol, qty, 'sell', order_type='market', is_strategy_exit=True)
+                     else:
+                         print(colored(f"  [EXIT PENDING] {symbol} stop-loss order not filled; not logging exit yet.", "yellow"))
                      continue
 
                 # 2. SMART EXIT SYSTEM (replaces old trailing stop + time exit)
@@ -740,36 +778,22 @@ class StrategyEngine:
                     exit_reason = 'time_exit'
 
                 if should_sell:
-                    if audit_logger:
-                        _hh_exit = hold_hours
-                        _peak_exit = self._get_peak_price(symbol)
-                        _strat_exit = self.execution_handler.get_origin_strategy(symbol)
-                        _ind_exit2 = self._quick_indicators(bars)
-                        # Build human-readable exit_detail
-                        _hh_str = f"{_hh_exit:.1f}h" if _hh_exit else "?h"
-                        _detail = f"{exit_reason}: ROI={roi*100:+.2f}% after {_hh_str}"
-                        audit_logger.log_trade_exit(
-                            symbol=symbol, exit_reason=exit_reason or 'unknown',
-                            exit_price=current_price, entry_price=entry_price,
-                            pnl_pct=round(roi * 100, 4),
-                            pnl_usd=round(qty * (current_price - entry_price), 6),
-                            hold_duration_hours=_hh_exit,
-                            regime=regime if 'regime' in dir() else None,
-                            btc_trend=global_trend,
-                            exit_detail=_detail,
-                            indicators_at_exit=_ind_exit2,
-                            peak_price=_peak_exit,
-                            strategy=_strat_exit,
-                            submitted_exit_price=current_price,
-                        )
-                        audit_logger.record_exit(
-                            strategy=_strat_exit, exit_reason=exit_reason or 'unknown',
-                            pnl_usd=round(qty * (current_price - entry_price), 6),
-                        )
                     # Use limit orders for profitable exits (saves 0.30% fee),
                     # market orders for loss exits (need immediate execution)
                     _exit_order_type = 'limit' if roi > 0 else 'market'
-                    self.execution_handler.submit_order(symbol, qty, 'sell', order_type=_exit_order_type, is_strategy_exit=True)
+                    _exit_order = self.execution_handler.submit_order(symbol, qty, 'sell', order_type=_exit_order_type, is_strategy_exit=True)
+                    if _order_filled(_exit_order):
+                        _hh_exit = hold_hours
+                        _strat_exit = self.execution_handler.get_origin_strategy(symbol)
+                        _hh_str = f"{_hh_exit:.1f}h" if _hh_exit else "?h"
+                        _log_verified_exit(
+                            symbol, qty, entry_price, current_price, exit_reason,
+                            _hh_exit, regime if 'regime' in dir() else None, _strat_exit,
+                            f"{exit_reason}: ROI={roi*100:+.2f}% after {_hh_str}",
+                            bars,
+                        )
+                    else:
+                        print(colored(f"  [EXIT PENDING] {symbol} {exit_reason} order not filled; not logging exit yet.", "yellow"))
                     continue
 
             # 3. STRATEGY SPECIFIC EXIT (Regime Aware) - Kept as backup signal
@@ -790,42 +814,29 @@ class StrategyEngine:
             
             if 'SELL' in signal['signal']:
                  print(colored(f"  [STRATEGY EXIT] {symbol} ({strategy_name if strategy_name else 'FALLBACK'}): {signal['signal']}. Selling.", "yellow"))
-                 if audit_logger:
-                     _et_se = self.execution_handler.get_entry_time(symbol)
-                     _ep_se = self.execution_handler.get_entry_price(symbol)
-                     _hh_se = None
-                     _pnl_pct_se = None
-                     _pnl_usd_se = None
-                     _curr_se = bars['close'].iloc[-1]
-                     try:
-                         if _et_se and hasattr(_et_se, 'timestamp'):
-                             _hh_se = (pd.Timestamp.now() - _et_se).total_seconds() / 3600
-                         if _ep_se:
-                             _roi_se = (_curr_se - _ep_se) / _ep_se
-                             _pnl_pct_se = round(_roi_se * 100, 4)
-                             _pnl_usd_se = round(qty * (_curr_se - _ep_se), 6)
-                     except Exception:
-                         pass
-                     _peak_se = self._get_peak_price(symbol)
-                     audit_logger.log_trade_exit(
-                         symbol=symbol, exit_reason='strategy_signal',
-                         exit_price=_curr_se, entry_price=_ep_se,
-                         pnl_pct=_pnl_pct_se, pnl_usd=_pnl_usd_se,
-                         hold_duration_hours=_hh_se,
-                         regime=regime,
-                         btc_trend=global_trend,
-                         exit_detail=f"Strategy {strategy_name} emitted {signal['signal']} at price {_curr_se:.5f}",
-                         indicators_at_exit=self._quick_indicators(bars),
-                         peak_price=_peak_se,
-                         strategy=strategy_name,
-                         submitted_exit_price=_curr_se,
-                     )
-                     audit_logger.record_exit(
-                         strategy=strategy_name, exit_reason='strategy_signal',
-                         pnl_usd=_pnl_usd_se,
-                     )
+                 _et_se = self.execution_handler.get_entry_time(symbol)
+                 _ep_se = self.execution_handler.get_entry_price(symbol)
+                 _hh_se = None
+                 _pnl_pct_se = None
+                 _curr_se = bars['close'].iloc[-1]
+                 try:
+                     if _et_se and hasattr(_et_se, 'timestamp'):
+                         _hh_se = (pd.Timestamp.now() - _et_se).total_seconds() / 3600
+                     if _ep_se:
+                         _pnl_pct_se = round((_curr_se - _ep_se) / _ep_se * 100, 4)
+                 except Exception:
+                     pass
                  _se_otype = 'limit' if (_pnl_pct_se and _pnl_pct_se > 0) else 'market'
-                 self.execution_handler.submit_order(symbol, qty, 'sell', order_type=_se_otype, is_strategy_exit=True, strategy_name=strategy_name)
+                 _se_order = self.execution_handler.submit_order(symbol, qty, 'sell', order_type=_se_otype, is_strategy_exit=True, strategy_name=strategy_name)
+                 if _order_filled(_se_order):
+                     _log_verified_exit(
+                         symbol, qty, _ep_se, _curr_se, 'strategy_signal',
+                         _hh_se, regime, strategy_name,
+                         f"Strategy {strategy_name} emitted {signal['signal']} at price {_curr_se:.5f}",
+                         bars,
+                     )
+                 else:
+                     print(colored(f"  [EXIT PENDING] {symbol} strategy exit order not filled; not logging exit yet.", "yellow"))
                  continue
         
         # 2. SCAN OPPORTUNITIES WITH STRATEGY CONFIRMATION
@@ -839,6 +850,27 @@ class StrategyEngine:
                 targets = json.load(f)
         except Exception as e:
             print(f"  > No targets found or error reading json: {e}")
+
+        # Reject stale scanner output. A 15m strategy should not trade targets
+        # generated hours/days ago if the scanner or Railway worker stalled.
+        fresh_targets = []
+        now_utc = pd.Timestamp.utcnow()
+        for t in targets:
+            ts = t.get('last_updated')
+            if not ts:
+                continue
+            try:
+                age_min = (now_utc - pd.Timestamp(ts).tz_localize(None).tz_localize('UTC')).total_seconds() / 60
+            except Exception:
+                try:
+                    age_min = (now_utc.tz_localize(None) - pd.Timestamp(ts)).total_seconds() / 60
+                except Exception:
+                    continue
+            if age_min <= Config.TARGET_MAX_AGE_MINUTES:
+                fresh_targets.append(t)
+        if targets and not fresh_targets:
+            print(colored(f"  > All targets are stale (>{Config.TARGET_MAX_AGE_MINUTES} min). Skipping new entries.", "yellow"))
+        targets = fresh_targets
             
         if not targets:
             print(colored("  > No targets provided by Control Tower.", "yellow"))
@@ -853,6 +885,24 @@ class StrategyEngine:
         if self.daily_trade_count >= Config.MAX_DAILY_TRADES:
             print(colored(f"  > Daily trade limit reached ({self.daily_trade_count}/{Config.MAX_DAILY_TRADES}). No new entries.", "yellow"))
             return
+
+        if self.daily_fee_total >= Config.MAX_DAILY_FEE_BUDGET:
+            print(colored(f"  > Daily fee budget reached (${self.daily_fee_total:.2f}/${Config.MAX_DAILY_FEE_BUDGET:.2f}). No new entries.", "yellow"))
+            return
+
+        try:
+            import json as _json
+            if os.path.exists('data/session.json') and current_equity:
+                with open('data/session.json') as _sf:
+                    _session = _json.load(_sf)
+                _daily_open = _session.get('daily_equity')
+                if _daily_open and _daily_open > 0:
+                    _daily_pnl_pct = (current_equity - _daily_open) / _daily_open
+                    if _daily_pnl_pct <= -Config.MAX_DAILY_LOSS_PCT:
+                        print(colored(f"  > Daily loss limit hit ({_daily_pnl_pct*100:.2f}%). No new entries.", "red"))
+                        return
+        except Exception:
+            pass
 
         # NOTE: No hard bear market gate here. Individual strategies have their own
         # bear filters (MEAN_REV blocks unless RSI<25 in BEARISH, MOMENTUM blocks
@@ -942,7 +992,7 @@ class StrategyEngine:
         trades_made = 0
 
         for target in targets:
-            if trades_made >= slots_available:
+            if trades_made >= min(slots_available, Config.MAX_ENTRIES_PER_CYCLE):
                 break
 
             # Daily limit check (in case we entered some already)
@@ -952,6 +1002,10 @@ class StrategyEngine:
 
             symbol = target['symbol']
             asset_ticker = symbol.split('/')[0]
+
+            if symbol in Config.BLOCKED_SYMBOLS:
+                print(colored(f"    > {symbol}: blocked by verified-loss blacklist. Skipping.", "yellow"))
+                continue
 
             # ─── Already holding (real position, not dust) ───
             if asset_ticker in open_assets:
@@ -1160,6 +1214,18 @@ class StrategyEngine:
             price = self.data_handler.get_latest_price(symbol)
             if not price: continue
 
+            try:
+                _quote = self.execution_handler.exchange.fetch_ticker(symbol)
+                _bid = _quote.get('bid')
+                _ask = _quote.get('ask')
+                if _bid and _ask and _ask > 0:
+                    _spread_pct = (_ask - _bid) / ((_ask + _bid) / 2)
+                    if _spread_pct > Config.MAX_SPREAD_PCT:
+                        print(colored(f"    > {symbol}: spread {_spread_pct*100:.2f}% > {Config.MAX_SPREAD_PCT*100:.2f}%. SKIP.", "yellow"))
+                        continue
+            except Exception:
+                pass
+
             # Fixed allocation — always exactly FIXED_ALLOCATION_USD ($15).
             # ATR scaling was removed: it could reduce below Kraken's $15 minimum,
             # silently blocking every trade. Log ATR for audit purposes only.
@@ -1175,6 +1241,14 @@ class StrategyEngine:
             print(f"    > {symbol}: allocation=${allocation_per_trade:.2f} (fixed)")
 
             qty = allocation_per_trade / price
+
+            # Trade only when recent structure implies enough room to pay fees,
+            # spread, and still make a real net profit.
+            recent_high = bars['high'].tail(20).max()
+            expected_move = (recent_high - price) / price if price else 0
+            if expected_move < Config.MIN_EXPECTED_GROSS_MOVE:
+                print(colored(f"    > {symbol}: expected move {expected_move*100:.1f}% < {Config.MIN_EXPECTED_GROSS_MOVE*100:.1f}% minimum. SKIP.", "yellow"))
+                continue
             
             # ─── PAPER TRADING MODE ───
             if Config.PAPER_TRADING:
@@ -1192,7 +1266,7 @@ class StrategyEngine:
                 symbol, qty, 'buy', order_type=Config.DEFAULT_ORDER_TYPE, price=price, strategy_name=best_signal['strategy']
             )
             
-            if order:
+            if order and _order_filled(order):
                 if audit_logger:
                     _ep_entry = order.get('average') or order.get('price') or price
                     _sig_meta = best_signal.get('meta', {}) or {}
@@ -1220,6 +1294,8 @@ class StrategyEngine:
                 # Track for intra-cycle diversification
                 open_assets.add(asset_ticker)
                 strategies_entered_this_cycle.add(best_signal['strategy'])
+            elif order:
+                print(colored(f"    > {symbol}: entry order pending/unfilled; not counting as a trade.", "yellow"))
 
         # ─── AUDIT: CYCLE SUMMARY (logged at end so signal stats are complete) ───
         if audit_logger:

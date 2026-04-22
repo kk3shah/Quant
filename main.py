@@ -131,19 +131,22 @@ def run_bot():
     except Exception as e:
         print(colored(f"Fatal Error in Batch Analysis: {e}", "red"))
 
-    # SELF-LEARNING: Run optimizer after every cycle to auto-adjust thresholds
-    try:
-        from strategies.optimizer import run_optimizer
-        _opt_changes = run_optimizer(current_cycle=_cycle_count)
-        if _opt_changes:
-            for msg in _opt_changes:
-                print(colored(msg, "yellow"))
-            # Alert Telegram when a strategy is disabled or re-enabled
-            _alert_msgs = [m for m in _opt_changes if 'DISABLED' in m or 're-enabled' in m]
-            if _alert_msgs:
-                _tg('🤖 <b>Optimizer update</b>\n' + '\n'.join(f'  {m}' for m in _alert_msgs))
-    except Exception as _oe:
-        print(f"[OPTIMIZER] Error: {_oe}")
+    # SELF-LEARNING: disabled until it learns from verified Kraken net P&L.
+    if conf.ENABLE_OPTIMIZER:
+        try:
+            from strategies.optimizer import run_optimizer
+            _opt_changes = run_optimizer(current_cycle=_cycle_count)
+            if _opt_changes:
+                for msg in _opt_changes:
+                    print(colored(msg, "yellow"))
+                # Alert Telegram when a strategy is disabled or re-enabled
+                _alert_msgs = [m for m in _opt_changes if 'DISABLED' in m or 're-enabled' in m]
+                if _alert_msgs:
+                    _tg('🤖 <b>Optimizer update</b>\n' + '\n'.join(f'  {m}' for m in _alert_msgs))
+        except Exception as _oe:
+            print(f"[OPTIMIZER] Error: {_oe}")
+    else:
+        print("[OPTIMIZER] Disabled: waiting for verified Kraken-fill P&L integration.")
 
     # 3. Report
     print_daily_report(execution_handler)
